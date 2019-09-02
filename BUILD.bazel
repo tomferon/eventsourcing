@@ -1,0 +1,26 @@
+package(default_visibility = ["//visibility:public"])
+
+load(
+    "@rules_haskell//haskell:defs.bzl",
+    "haskell_library",
+)
+
+haskell_library(
+    name = "eventsourcing",
+    srcs = glob(["eventsourcing/src/**/*.hs"]),
+    deps = [
+        "//nix/haskell:base",
+        "//nix/haskell:hashable",
+        "//nix/haskell:mtl",
+        "//nix/haskell:unordered-containers",
+    ],
+)
+
+haskell_library(
+    name = "eventsourcing-postgresql",
+    srcs = glob(["eventsourcing-postgresql/src/**/*.hs"]),
+    deps = [
+        "//nix/haskell:base",
+        "//nix/haskell:postgresql-simple",
+    ],
+)
