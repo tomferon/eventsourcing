@@ -1,79 +1,60 @@
 module Database.CQRS.Projection
-  ( Projection(..)
-  , runProjectionStep
-  , runProjectionUntilDrained
-  , indexed
+  ( Projection
+  , Aggregator
+  , EffectfulProjection
+  , TaskManager
+  , runAggregator
   ) where
 
-import qualified Control.Monad.State as St
-import Data.Hashable (Hashable)
-import Data.Maybe (fromMaybe)
-import qualified Data.HashMap.Strict as HM
+import Control.Monad.Trans (lift)
+import Pipes ((>->))
 
-import Database.CQRS.Event
+import qualified Control.Monad.State.Strict as St
+import qualified Control.Monad.Identity     as Id
+import qualified Data.HashMap.Strict        as HM
+import qualified Pipes
 
--- | A projection is simply a function that "executes" some action on an event
--- in a environment @f@.
+import Database.CQRS.Stream
+
+-- | A projection is simply a function consuming events and producing results
+-- in an environment @f@.
+type Projection f event a
+  = event -> f a
+
+-- | Projection aggregating a state in memory.
+type Aggregator event agg
+  = event -> St.State agg ()
+
+-- | Projection returning actions that can be batched and executed.
 --
--- For example, if @f@ instantiates @MonadState Int@ and @a@ is @()@, then the
--- projection is a function modifying a state of type @Int@ depending on events
--- coming in. It could be
---
--- @
---  data MyEvent = EventA | EventB
---
---  bCounter :: MonadState Int f => Projection f MyEvent ()
---  bCounter = Projection $ \case
---    EventA -> modify' (+1)
---    EventB -> pure ()
--- @
-newtype Projection f e a
-  = Projection { unProjection :: e -> f a }
+-- This can be used to batch changes to tables in a database for example.
+type EffectfulProjection event action
+  = event -> Id.Identity [action]
 
--- | Run a projection on the next event in a stream.
-runProjectionStep
-  :: (EventStream m e s, Monad m)
-  => Projection m e a -> s -> m (Maybe a, s)
-runProjectionStep proj stream = do
-  (mEvent, stream') <- nextEvent stream
-  x <- traverse (unProjection proj) mEvent
-  pure (x, stream')
+-- | Projection deriving a list of commands from a stream of events.
+--
+-- Each command is identified by a unique key. This key is used when persisting
+-- the commands and synchronising work between task runners.
+type TaskManager event key command
+  = Aggregator event (HM.HashMap key command)
 
--- | Run a projection until the stream is drained.
-runProjectionUntilDrained
-  :: (EventStream m e s, Monad m, Monoid a)
-  => Projection m e a -> s -> m (a, s)
-runProjectionUntilDrained =
-    go mempty
+runAggregator
+  :: (Monad m, Stream m stream)
+  => Aggregator (EventWithContext' stream) agg
+  -> stream
+  -> StreamBounds stream
+  -> agg
+  -> m agg
+runAggregator aggregator stream bounds initState = do
+  flip St.execStateT initState . Pipes.runEffect $
+    Pipes.hoist lift (streamEvents stream bounds)
+    >->
+    mkPipe aggregator
+
   where
-    go
-      :: (EventStream m e s, Monad m)
-      => a -> Projection m e a -> s -> m (a, s)
-    go acc proj stream = do
-      (mEvent, stream') <- nextEvent stream
-      case mEvent of
-        Nothing -> pure (acc, stream')
-        Just event -> do
-          acc' <- unProjection proj event
-          go acc' proj stream'
-
--- | Build a projection that maintains individual state for each key of events
--- in a hash map.
---
--- For example, a stream of events about different entities may have events
--- containing the entity ID they relate to. This function could be used to
--- transform a projection from events for a single entity into a projection
--- from events for all entities.
-indexed
-  :: (Eq k, Hashable k, Monad m, Monoid v)
-  => (e -> k) -- | Function to extract the key associated to an event.
-  -> Projection (St.StateT v m) e a -- | Projection from events with the same key.
-  -> Projection (St.StateT (HM.HashMap k v) m) e a
-indexed getKey proj =
-  Projection $ \event -> do
-    let key = getKey event
-    hm <- St.get
-    let old = fromMaybe mempty $ HM.lookup key hm
-    (x, new) <- St.lift $ St.runStateT (unProjection proj event) old
-    St.put $ HM.insert key new hm
-    pure x
+    mkPipe
+      :: Monad m
+      => Aggregator a b -> Pipes.Pipe a Pipes.X (St.StateT b m) ()
+    mkPipe f = do
+      x <- Pipes.await
+      St.modify' . St.execState . f $ x

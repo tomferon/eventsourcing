@@ -15,7 +15,6 @@
 module Database.CQRS.Event
   ( Event(..)
   , WritableEvent(..)
-  , EventStream(..)
   ) where
 
 -- | Event that can read from some event stream with compatible decoding format
@@ -31,17 +30,6 @@ class Event e => WritableEvent e where
   -- | Format from which the event can be decoded, e.g. 'Data.Aeson.Value'.
   type EncodingFormat e :: *
   encodeEvent :: e -> EncodingFormat e
-
--- | Stream from which we can pull events in some environment, e.g. 'MonadIO'.
-class EventStream f e s | s -> e where
-  -- | Return the next event or 'Nothing' if there are none and a new stream
-  -- to use for further events.
-  nextEvent :: s -> f (Maybe e, s)
-
-instance Applicative f => EventStream f e [e] where
-  nextEvent = \case
-    [] -> pure (Nothing, [])
-    (e : es) -> pure (Just e, es)
 
 -- $unwritable_events
 -- @
