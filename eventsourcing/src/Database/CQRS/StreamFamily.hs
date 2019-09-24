@@ -30,6 +30,10 @@ class StreamFamily f fam where
   -- Events should appear in the correct order within a given stream but not
   -- necessarily in-between them, i.e. two events belonging to different streams
   -- won't necessarily be ordered according to the chronological history.
+  --
+  -- It is okay for events to be sent more than one time as long as the order
+  -- is respected within each stream if it makes the implementation easier and
+  -- prevents the loss of some events.
   allNewEvents
     :: fam
     -> Pipes.Producer
@@ -37,6 +41,8 @@ class StreamFamily f fam where
         f ()
 
   -- | Stream the identifier of the latest events for each stream in the family.
+  --
+  -- FIXME: more doc
   latestEventIdentifiers
     :: fam
     -> Pipes.Producer

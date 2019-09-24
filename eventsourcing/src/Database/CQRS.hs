@@ -7,11 +7,9 @@ module Database.CQRS
   , Stream(..)
   , EventWithContext(..)
   , EventWithContext'
-  , StreamBounds
+  , StreamBounds(..)
   , afterEvent
   , untilEvent
-  , fromTime
-  , toTime
 
     -- * Stream families
   , StreamFamily(..)

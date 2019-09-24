@@ -10,9 +10,11 @@ haskell_library(
     srcs = glob(["eventsourcing/src/**/*.hs"]),
     deps = [
         "//nix/haskell:base",
+        "//nix/haskell:deepseq",
+        "//nix/haskell:hashable",
         "//nix/haskell:mtl",
         "//nix/haskell:pipes",
-        "//nix/haskell:time",
+        "//nix/haskell:stm",
         "//nix/haskell:unordered-containers",
     ],
 )

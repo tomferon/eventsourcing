@@ -10,14 +10,11 @@ module Database.CQRS.Stream
   ( Stream(..)
   , EventWithContext(..)
   , EventWithContext'
-  , StreamBounds
+  , StreamBounds(..)
   , afterEvent
   , untilEvent
-  , fromTime
-  , toTime
   ) where
 
-import qualified Data.Time as T
 import qualified Pipes
 
 class Stream f stream where
@@ -25,16 +22,22 @@ class Stream f stream where
   type EventType stream :: *
 
   -- | Type of unique identifiers for events in the stream.
+  --
+  -- There must be a total order on identifiers so they can be sorted.
   type EventIdentifier stream :: *
 
   -- | Depending on the store, this structure can contain the creation date, a
   -- correlation ID, etc.
   type EventMetadata stream :: *
 
-  -- | Append the event to the stream.
+  -- | Append the event to the stream and return the identifier.
+  --
+  -- The identifier must be greater than the previous events' identifiers.
   writeEvent :: stream -> EventType stream -> f (EventIdentifier stream)
 
   -- | Stream all the events within some bounds.
+  --
+  -- Events must be streamed from lowest to greatest identifier.
   streamEvents
     :: stream
     -> StreamBounds stream
@@ -62,8 +65,6 @@ type EventWithContext' stream
 data StreamBounds stream = StreamBounds
   { _afterEvent :: Maybe (EventIdentifier stream) -- ^ Exclusive.
   , _untilEvent :: Maybe (EventIdentifier stream) -- ^ Inclusive.
-  , _fromTime   :: Maybe T.UTCTime                -- ^ Inclusive.
-  , _toTime     :: Maybe T.UTCTime                -- ^ Inclusive.
   }
 
 instance
@@ -73,8 +74,6 @@ instance
     StreamBounds
       { _afterEvent = combine _afterEvent max
       , _untilEvent = combine _untilEvent min
-      , _fromTime   = combine _fromTime   max
-      , _toTime     = combine _toTime     min
       }
     where
       combine :: (StreamBounds stream -> Maybe b) -> (b -> b -> b) -> Maybe b
@@ -85,7 +84,7 @@ instance
           (Just x, Just y) -> Just $ merge x y
 
 instance Ord (EventIdentifier stream) => Monoid (StreamBounds stream) where
-  mempty = StreamBounds Nothing Nothing Nothing Nothing
+  mempty = StreamBounds Nothing Nothing
 
 -- | After the event with the given identifier, excluding it.
 afterEvent
@@ -98,11 +97,3 @@ untilEvent
   :: Ord (EventIdentifier stream)
   => EventIdentifier stream -> StreamBounds stream
 untilEvent i = mempty { _untilEvent = Just i }
-
--- | At or after the given time.
-fromTime :: Ord (EventIdentifier stream) => T.UTCTime -> StreamBounds stream
-fromTime t = mempty { _fromTime = Just t }
-
--- | Up until and including the given time.
-toTime :: Ord (EventIdentifier stream) => T.UTCTime -> StreamBounds stream
-toTime t = mempty { _toTime = Just t }
