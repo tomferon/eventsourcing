@@ -1,3 +1,4 @@
+{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -14,6 +15,8 @@ module Database.CQRS.Stream
   , afterEvent
   , untilEvent
   ) where
+
+import GHC.Generics
 
 import qualified Pipes
 
@@ -45,12 +48,11 @@ class Stream f stream where
 
 -- | Once added to the stream, an event is adorned with an identifier and some
 -- metadata.
-data EventWithContext event identifier metadata
-  = EventWithContext
-      { event      :: event
-      , identifier :: identifier
-      , metadata   :: metadata
-      }
+data EventWithContext event identifier metadata = EventWithContext
+  { event      :: event
+  , identifier :: identifier
+  , metadata   :: metadata
+  } deriving (Eq, Show, Generic)
 
 type EventWithContext' stream
   = EventWithContext

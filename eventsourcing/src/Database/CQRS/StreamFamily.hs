@@ -25,7 +25,8 @@ class StreamFamily f fam where
   -- | Get the stream corresponding to a given identifier.
   getStream :: fam -> StreamIdentifier fam -> f (StreamType fam)
 
-  -- | Stream newly-created events from *all* streams.
+  -- | Initialise and return a producer of newly-created events from *all*
+  -- streams.
   --
   -- Events should appear in the correct order within a given stream but not
   -- necessarily in-between them, i.e. two events belonging to different streams
@@ -36,9 +37,9 @@ class StreamFamily f fam where
   -- prevents the loss of some events.
   allNewEvents
     :: fam
-    -> Pipes.Producer
-        (StreamIdentifier fam, (EventWithContext' (StreamType fam)))
-        f ()
+    -> f (Pipes.Producer
+          (StreamIdentifier fam, (EventWithContext' (StreamType fam)))
+          f ())
 
   -- | Stream the identifier of the latest events for each stream in the family.
   --

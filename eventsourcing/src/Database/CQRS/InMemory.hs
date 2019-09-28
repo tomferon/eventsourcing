@@ -2,6 +2,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
 
 module Database.CQRS.InMemory
@@ -14,15 +15,16 @@ module Database.CQRS.InMemory
 import Prelude hiding (last, length)
 
 import Control.Exception (evaluate)
-import Control.Monad (forM, when)
+import Control.Monad (forever, forM, when)
 import Control.Monad.Trans (MonadIO(..))
 import Data.Foldable (foldrM)
-import System.Mem.Weak (addFinalizer)
+import System.Mem.Weak (Weak, deRefWeak, mkWeakPtr)
 
 import qualified Control.Concurrent.STM as STM
 import qualified Control.DeepSeq        as Seq
 import qualified Data.Hashable          as Hash
 import qualified Data.HashMap.Strict    as HM
+import qualified GHC.Conc
 import qualified Pipes
 
 import qualified Database.CQRS as CQRS
@@ -116,11 +118,8 @@ streamStreamEvent stream bounds = do
 data StreamFamily identifier event = StreamFamily
   { hashMap :: STM.TVar (HM.HashMap identifier (Stream event))
   , queues
-      :: STM.TVar
-           [ ( STM.TBQueue (identifier, CQRS.EventWithContext' (Stream event))
-             , STM.TVar Bool -- Is this queue still alive?
-             )
-           ]
+      :: STM.TVar [Weak (STM.TBQueue
+                          (identifier, CQRS.EventWithContext' (Stream event)))]
   }
 
 emptyStreamFamily :: MonadIO m => m (StreamFamily identifier event)
@@ -146,14 +145,14 @@ streamFamilyNotify
   -> STM.STM ()
 streamFamilyNotify StreamFamily{..} identifier event = do
   qs <- STM.readTVar queues
-  qs' <- (\f -> foldrM f [] qs) $ \pair@(q, aliveVar) acc -> do
-    alive <- STM.readTVar aliveVar
-    if alive
-      then do
-        STM.writeTBQueue q (identifier, event)
-        pure $ pair : acc
-      else
-        pure acc
+  qs' <- (\f -> foldrM f [] qs) $ \queueWeak acc -> do
+    -- This call to unsafeIOToSTM should be safe in this context.
+    mQueue <- GHC.Conc.unsafeIOToSTM $ deRefWeak queueWeak
+    case mQueue of
+      Just queue -> do
+        STM.writeTBQueue queue (identifier, event)
+        pure $ queueWeak : acc
+      Nothing -> pure acc
   STM.writeTVar queues qs'
 
 streamFamilyGetStream
@@ -172,35 +171,28 @@ streamFamilyGetStream sf@StreamFamily{..} identifier =
       Just stream -> pure stream
 
 streamFamilyAllNewEvents
-  :: MonadIO m
+  :: forall identifier event m. MonadIO m
   => StreamFamily identifier event
-  -> Pipes.Producer (identifier, CQRS.EventWithContext' (Stream event)) m ()
-streamFamilyAllNewEvents =
-    go ()
+  -> m (Pipes.Producer
+        (identifier, CQRS.EventWithContext' (Stream event))
+        m ())
+streamFamilyAllNewEvents StreamFamily{..} = do
+    queue <- initialise
+    pure $ producer queue
   where
-    go
-      :: MonadIO m
-      => () -- When this is garbage-collected, the queue is deregistered.
-      -> StreamFamily identifier event
-      -> Pipes.Producer
-          (identifier, CQRS.EventWithContext' (Stream event))
-          m ()
-    go key StreamFamily{..} = do
-      queue <- liftIO $ do
-        q     <- STM.newTBQueueIO 100
-        alive <- STM.newTVarIO True
-        addFinalizer key $
-          STM.atomically . STM.writeTVar alive $ False
-        STM.atomically $
-          STM.modifyTVar' queues ((q, alive) :)
-        pure q
-      consume key queue
+    initialise
+      :: m (STM.TBQueue
+             (identifier, CQRS.EventWithContext' (Stream event)))
+    initialise = liftIO $ do
+      queue <- STM.newTBQueueIO 100
+      queueWeak <- mkWeakPtr queue Nothing
+      STM.atomically $ STM.modifyTVar' queues (queueWeak :)
+      pure queue
 
-    consume :: MonadIO m => () -> STM.TBQueue a -> Pipes.Producer a m ()
-    consume key queue = do
+    producer :: STM.TBQueue a -> Pipes.Producer a m ()
+    producer queue = forever $ do
       x <- liftIO . STM.atomically $ STM.readTBQueue queue
       Pipes.yield x
-      consume key queue
 
 streamFamilyLatestEventIdentifiers
   :: MonadIO m
@@ -210,9 +202,8 @@ streamFamilyLatestEventIdentifiers StreamFamily{..} = do
   ids <- liftIO . STM.atomically $ do
     hm <- STM.readTVar hashMap
     let pairs = HM.toList hm
-    forM pairs $ \(streamID, stream) -> do
-      len <- STM.readTVar $ length stream
-      let lastEventID = len - 1
-      pure (streamID, lastEventID)
+    forM pairs $ \(streamId, stream) -> do
+      lastEventId <- STM.readTVar $ length stream
+      pure (streamId, lastEventId)
 
   Pipes.each ids
