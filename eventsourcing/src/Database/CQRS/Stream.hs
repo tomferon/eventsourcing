@@ -1,5 +1,6 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
@@ -11,7 +12,10 @@ module Database.CQRS.Stream
   ( Stream(..)
   , EventWithContext(..)
   , EventWithContext'
+  , MonadMetadata(..)
+  , writeEvent
   , StreamBounds(..)
+  , StreamBounds'
   , afterEvent
   , untilEvent
   ) where
@@ -36,66 +40,87 @@ class Stream f stream where
   -- | Append the event to the stream and return the identifier.
   --
   -- The identifier must be greater than the previous events' identifiers.
-  writeEvent :: stream -> EventType stream -> f (EventIdentifier stream)
+  writeEventWithMetadata
+    :: stream
+    -> EventType stream
+    -> EventMetadata stream
+    -> f (EventIdentifier stream)
 
   -- | Stream all the events within some bounds.
   --
   -- Events must be streamed from lowest to greatest identifier.
   streamEvents
     :: stream
-    -> StreamBounds stream
+    -> StreamBounds' stream
     -> Pipes.Producer (EventWithContext' stream) f ()
 
 -- | Once added to the stream, an event is adorned with an identifier and some
 -- metadata.
-data EventWithContext event identifier metadata = EventWithContext
-  { event      :: event
-  , identifier :: identifier
+data EventWithContext identifier metadata event = EventWithContext
+  { identifier :: identifier
   , metadata   :: metadata
+  , event      :: event
   } deriving (Eq, Show, Generic)
 
 type EventWithContext' stream
   = EventWithContext
-      (EventType stream)
       (EventIdentifier stream)
       (EventMetadata stream)
+      (EventType stream)
+
+-- | The event metadata come from the current "environment".
+class MonadMetadata metadata m where
+  getMetadata :: m metadata
+
+instance Monad m => MonadMetadata () m where
+  getMetadata = pure ()
+
+-- | Get the metadata from the environment, append the event to the store and
+-- return the identifier.
+writeEvent
+  :: (Monad m, MonadMetadata (EventMetadata stream) m, Stream m stream)
+  => stream
+  -> EventType stream
+  -> m (EventIdentifier stream)
+writeEvent stream ev = do
+  md <- getMetadata
+  writeEventWithMetadata stream ev md
 
 -- | Lower/upper bounds of an event stream.
 --
 -- The 'Semigroup' instance returns bounds for the intersection of the two
 -- streams.
-data StreamBounds stream = StreamBounds
-  { _afterEvent :: Maybe (EventIdentifier stream) -- ^ Exclusive.
-  , _untilEvent :: Maybe (EventIdentifier stream) -- ^ Inclusive.
+data StreamBounds identifier = StreamBounds
+  { _afterEvent :: Maybe identifier -- ^ Exclusive.
+  , _untilEvent :: Maybe identifier -- ^ Inclusive.
   }
 
+type StreamBounds' stream = StreamBounds (EventIdentifier stream)
+
 instance
-    forall stream. Ord (EventIdentifier stream)
-    => Semigroup (StreamBounds stream) where
+    forall identifier. Ord identifier
+    => Semigroup (StreamBounds identifier) where
   sb1 <> sb2 =
     StreamBounds
       { _afterEvent = combine _afterEvent max
       , _untilEvent = combine _untilEvent min
       }
     where
-      combine :: (StreamBounds stream -> Maybe b) -> (b -> b -> b) -> Maybe b
+      combine
+        :: (StreamBounds identifier -> Maybe b) -> (b -> b -> b) -> Maybe b
       combine proj merge =
         case (proj sb1, proj sb2) of
           (mx, Nothing) -> mx
           (Nothing, my) -> my
           (Just x, Just y) -> Just $ merge x y
 
-instance Ord (EventIdentifier stream) => Monoid (StreamBounds stream) where
+instance Ord identifier => Monoid (StreamBounds identifier) where
   mempty = StreamBounds Nothing Nothing
 
 -- | After the event with the given identifier, excluding it.
-afterEvent
-  :: Ord (EventIdentifier stream)
-  => EventIdentifier stream -> StreamBounds stream
+afterEvent :: Ord identifier => identifier -> StreamBounds identifier
 afterEvent i = mempty { _afterEvent = Just i }
 
 -- | Until the event with the given identifier, including it.
-untilEvent
-  :: Ord (EventIdentifier stream)
-  => EventIdentifier stream -> StreamBounds stream
+untilEvent :: Ord identifier => identifier -> StreamBounds identifier
 untilEvent i = mempty { _untilEvent = Just i }

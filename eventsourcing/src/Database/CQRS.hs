@@ -7,7 +7,10 @@ module Database.CQRS
   , Stream(..)
   , EventWithContext(..)
   , EventWithContext'
+  , MonadMetadata(..)
+  , writeEvent
   , StreamBounds(..)
+  , StreamBounds'
   , afterEvent
   , untilEvent
 

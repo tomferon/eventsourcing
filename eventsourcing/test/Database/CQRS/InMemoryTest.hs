@@ -1,4 +1,5 @@
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE TypeApplications #-}
 
 module Database.CQRS.InMemoryTest
   ( tests
@@ -47,7 +48,7 @@ writtenExactlyOnce = do
     mvar   <- liftIO newEmptyMVar
     pure (streamId, events, mvar)
 
-  streamFamily <- CQRS.InMem.emptyStreamFamily
+  streamFamily <- CQRS.InMem.emptyStreamFamily @()
 
   mvars <- liftIO $ for chunks $ \(streamId, events, mvar) -> do
     _ <- forkIO $ do
@@ -71,8 +72,8 @@ writtenExactlyOnce = do
 
 writingSendsNotification :: PropertyT IO ()
 writingSendsNotification = do
-  streamFamily <- CQRS.InMem.emptyStreamFamily
-  notifStream  <- CQRS.allNewEvents streamFamily
+  streamFamily <- CQRS.InMem.emptyStreamFamily @()
+  notifStream <- CQRS.allNewEvents streamFamily
 
   events <- forAll $ Gen.list (Range.linear 1 100) $
     (,)
@@ -92,8 +93,8 @@ writingSendsNotification = do
 
 gcRemovesListener :: PropertyT IO ()
 gcRemovesListener = do
-  streamFamily <- CQRS.InMem.emptyStreamFamily
-  stream       <- CQRS.getStream streamFamily ()
+  streamFamily <- CQRS.InMem.emptyStreamFamily @()
+  stream <- CQRS.getStream streamFamily ()
 
   notifStreamMVar <- liftIO newEmptyMVar
   liftIO $ putMVar notifStreamMVar . Just =<< CQRS.allNewEvents streamFamily
