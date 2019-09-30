@@ -21,14 +21,13 @@ module Database.CQRS.Event
 -- and fed to a projection or aggregated in some way.
 class Event e where
   -- | Format in which the event is encoded, e.g. 'Data.Aeson.Value'.
-  type DecodingFormat e :: *
-  decodeEvent :: DecodingFormat e -> Either String e
+  type EncodingFormat e :: *
+  decodeEvent :: EncodingFormat e -> Either String e
 
 -- | Event that can be written to an event stream. This is separate from 'Event'
 -- to make it possible to restrict the events that can be written with a GADT.
 class Event e => WritableEvent e where
   -- | Format from which the event can be decoded, e.g. 'Data.Aeson.Value'.
-  type EncodingFormat e :: *
   encodeEvent :: e -> EncodingFormat e
 
 -- $unwritable_events

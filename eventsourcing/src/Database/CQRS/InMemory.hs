@@ -59,8 +59,9 @@ emptyStreamSTM = do
       notify = const $ pure ()
   pure Stream{..}
 
-instance (MonadIO m, Seq.NFData event, Seq.NFData metadata)
-  => CQRS.Stream m (Stream metadata event) where
+instance
+    (MonadIO m, Seq.NFData event, Seq.NFData metadata)
+    => CQRS.Stream m (Stream metadata event) where
   type EventType       (Stream metadata event) = event
   type EventIdentifier (Stream metadata event) = Integer -- starting at 1
   type EventMetadata   (Stream metadata event) = metadata
@@ -149,8 +150,9 @@ emptyStreamFamily =
     queues  <- STM.newTVar []
     pure StreamFamily{..}
 
-instance (Eq identifier, Hash.Hashable identifier, MonadIO m)
-  => CQRS.StreamFamily m (StreamFamily identifier metadata event) where
+instance
+    (Eq identifier, Hash.Hashable identifier, MonadIO m)
+    => CQRS.StreamFamily m (StreamFamily identifier metadata event) where
   type StreamType (StreamFamily identifier metadata event) =
     Stream metadata event
   type StreamIdentifier (StreamFamily identifier metadata event) =

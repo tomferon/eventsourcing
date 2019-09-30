@@ -23,8 +23,12 @@ module Database.CQRS
   , EffectfulProjection
   , TaskManager
   , runAggregator
+
+  -- * Errors
+  , Error(..)
   ) where
 
+import Database.CQRS.Error
 import Database.CQRS.Event
 import Database.CQRS.Projection
 import Database.CQRS.Stream

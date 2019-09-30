@@ -40,7 +40,11 @@ haskell_library(
     name = "eventsourcing-postgresql",
     srcs = glob(["eventsourcing-postgresql/src/**/*.hs"]),
     deps = [
+        ":eventsourcing",
         "//nix/haskell:base",
+        "//nix/haskell:mtl",
+        "//nix/haskell:pipes",
         "//nix/haskell:postgresql-simple",
+        "//nix/haskell:resource-pool",
     ],
 )
