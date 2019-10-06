@@ -14,11 +14,11 @@ module Database.CQRS.InMemory
 
 import Prelude hiding (last, length)
 
-import Control.Exception (evaluate)
-import Control.Monad (forever, forM, when)
+import Control.Exception   (evaluate)
+import Control.Monad       (forever, forM, when)
 import Control.Monad.Trans (MonadIO(..))
-import Data.Foldable (foldrM)
-import System.Mem.Weak (Weak, deRefWeak, mkWeakPtr)
+import Data.Foldable       (foldrM)
+import System.Mem.Weak     (Weak, deRefWeak, mkWeakPtr)
 
 import qualified Control.Concurrent.STM as STM
 import qualified Control.DeepSeq        as Seq

@@ -43,7 +43,9 @@ class StreamFamily f fam where
 
   -- | Stream the identifier of the latest events for each stream in the family.
   --
-  -- FIXME: more doc
+  -- It is a snapshot of the last event identifiers at the time the producer is
+  -- called. It is meant to be used by projections to catch up to the latest
+  -- state.
   latestEventIdentifiers
     :: fam
     -> Pipes.Producer

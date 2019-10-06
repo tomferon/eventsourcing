@@ -1,29 +1,35 @@
+{-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
 
 module Database.CQRS.PostgreSQL.Stream
   ( Stream
+  , makeStream
+  , makeStream'
   ) where
 
-import Control.Monad                    (when)
-import Control.Monad.Trans              (MonadIO(..))
-import Data.Foldable                    (foldlM)
-import Data.Functor                     ((<&>))
-import Data.List                        (intersperse)
-import Data.Maybe                       (catMaybes)
-import Database.PostgreSQL.Simple       ((:.)(..))
-import Database.PostgreSQL.Simple.SqlQQ (sql)
+import Control.Exception          (Exception, Handler(..), catches)
+import Control.Monad              (when)
+import Control.Monad.Trans        (MonadIO(..))
+import Data.Foldable              (foldlM)
+import Data.Functor               ((<&>))
+import Data.List                  (intersperse)
+import Data.Maybe                 (catMaybes)
+import Data.Proxy                 (Proxy(..))
+import Data.String                (fromString)
+import Database.PostgreSQL.Simple ((:.)(..))
 
 import qualified Control.Monad.Except                 as Exc
-import qualified Data.Pool                            as Pool
 import qualified Database.PostgreSQL.Simple           as PG
 import qualified Database.PostgreSQL.Simple.FromField as PG.From
 import qualified Database.PostgreSQL.Simple.FromRow   as PG.From
@@ -33,12 +39,77 @@ import qualified Pipes
 
 import qualified Database.CQRS as CQRS
 
-data Stream identifier metadata event = Stream
-  { connectionPool   :: Pool.Pool PG.Connection
-  , selectQuery      :: PG.Query -- Select all events in correct order.
-  , insertQuery      :: PG.Query
-  , identifierColumn :: PG.Query
-  }
+-- | Stream of events stored in a PostgreSQL relation.
+--
+-- The job of sharding streams in different tables is left to the database. If
+-- this is something you want to do, you can create a view and a trigger on
+-- insert into that view.
+data Stream identifier metadata event =
+  forall r r'. (PG.To.ToRow r, PG.To.ToRow r') => Stream
+    { connectionPool   :: forall a. (PG.Connection -> IO a) -> IO a
+    , selectQuery      :: (PG.Query, r)
+      -- ^ Select all events in correct order.
+    , insertQuery      :: (PG.Query, r')
+    , identifierColumn :: PG.Query
+    }
+
+-- | Make a 'Stream' from basic information about the relation name and columns.
+makeStream
+  :: (forall a. (PG.Connection -> IO a) -> IO a)
+     -- ^ Connection pool as a function.
+  -> PG.Query   -- ^ Relation name.
+  -> PG.Query   -- ^ Identifier column name. If there are several, use a tuple.
+  -> [PG.Query] -- ^ Column names for metadata.
+  -> PG.Query   -- ^ Event column name.
+  -> Stream identifier metadata event
+makeStream connectionPool relation
+           identifierColumn metadataColumns eventColumn =
+    let selectQuery = (selectQuery', ())
+        insertQuery = (insertQuery', ())
+    in Stream{..}
+
+  where
+    selectQuery' :: PG.Query
+    selectQuery' =
+      "SELECT "
+      <> identifierColumn <> ", "
+      <> metadataList <> ", "
+      <> eventColumn
+      <> " FROM "  <> relation
+      <> " ORDER BY " <> identifierColumn <> " ASC"
+
+    insertQuery' :: PG.Query
+    insertQuery' =
+      "INSERT INTO " <> relation <> "("
+      <> identifierColumn <> ", " <> metadataList <> ", " <> eventColumn
+      <> ") VALUES (?, "
+      <> metadataMarks
+      <> ", ?) RETURNING "
+      <> identifierColumn
+
+    metadataList :: PG.Query
+    metadataList =
+      mconcat . intersperse "," $ metadataColumns
+
+    metadataMarks :: PG.Query
+    metadataMarks =
+      mconcat . intersperse "," . map (const "?") $ metadataColumns
+
+-- | Make a stream from queries.
+--
+-- This function is less safe than 'makeStream' and should only be used when
+-- 'makeStream' is not flexible enough. It is also closer to the implementation
+-- and more subject to changes.
+makeStream'
+  :: (PG.To.ToRow r, PG.To.ToRow r')
+  => (forall a. (PG.Connection -> IO a) -> IO a)
+     -- ^ Connection pool as a function.
+  -> (PG.Query, r) -- ^ Select query.
+  -> (PG.Query, r') -- ^ Insert query template (with question marks.)
+  -> PG.Query -- ^ Identifier column (use tuple if several.)
+  -> Stream identifier metadata event
+makeStream' connectionPool selectQuery insertQuery identifierColumn =
+  Stream{..}
 
 instance
     ( CQRS.WritableEvent event
@@ -60,8 +131,6 @@ instance
   writeEventWithMetadata = streamWriteEventWithMetadata
   streamEvents           = streamStreamEvents
 
--- FIXME: catch IO exceptions
-
 streamWriteEventWithMetadata
   :: ( CQRS.WritableEvent event
      , Exc.MonadError CQRS.Error m
@@ -76,13 +145,21 @@ streamWriteEventWithMetadata
   -> metadata
   -> m identifier
 streamWriteEventWithMetadata Stream{..} event metadata = do
-  eRes <- liftIO . Pool.withResource connectionPool $ \conn -> do
-    ids <- PG.query conn insertQuery $
-      metadata :. PG.Only (CQRS.encodeEvent event)
-    pure $ case ids of
-      [PG.Only identifier] -> Right identifier
-      _ -> Left $ show (length ids) ++ " events were inserted"
-  either (Exc.throwError . CQRS.EventWriteError) pure eRes
+  eIds <- liftIO . connectionPool $ \conn -> do
+    let params = metadata :. PG.Only (CQRS.encodeEvent event)
+    (Right <$> PG.query conn (fst insertQuery) (snd insertQuery :. params))
+      `catches`
+        [ handleError (Proxy @PG.FormatError) CQRS.EventWriteError
+        , handleError (Proxy @PG.QueryError)  CQRS.EventWriteError
+        , handleError (Proxy @PG.ResultError) CQRS.EventWriteError
+        , handleError (Proxy @PG.SqlError)    CQRS.EventWriteError
+        ]
+
+  case eIds of
+    Left err -> Exc.throwError err
+    Right [PG.Only identifier] -> pure identifier
+    Right ids -> Exc.throwError $ CQRS.EventWriteError $
+      show (length ids) ++ " events were inserted"
 
 streamStreamEvents
   :: forall identifier metadata event m.
@@ -107,23 +184,28 @@ streamStreamEvents Stream{..} bounds =
       -> Pipes.Producer (CQRS.EventWithContext identifier metadata event) m ()
     go lastFetchedIdentifier = do
       -- Fetch 'batchSize' parsed events from the DB.
-      eEvents <- liftIO . Pool.withResource connectionPool $ \conn -> do
-        rows <- fetchBatch conn lastFetchedIdentifier
-        pure $ rows <&> \(PG.Only identifier :. metadata :. PG.Only encEvent) ->
-          case CQRS.decodeEvent encEvent of
-            Left err -> Left $ CQRS.EventDecodingError err
-            Right event ->
-              Right $ CQRS.EventWithContext identifier metadata event
+      eRows <- liftIO . connectionPool $ \conn ->
+        (Right <$> fetchBatch conn lastFetchedIdentifier)
+          `catches`
+            [ handleError (Proxy @PG.FormatError) CQRS.EventRetrievalError
+            , handleError (Proxy @PG.QueryError)  CQRS.EventRetrievalError
+            , handleError (Proxy @PG.ResultError) CQRS.EventRetrievalError
+            , handleError (Proxy @PG.SqlError)    CQRS.EventRetrievalError
+            ]
+
+      rows <- either Exc.throwError pure eRows
 
       -- Yield events accumulating the last event identifier.
-      mLfi <- (\f -> foldlM f Nothing eEvents) $ const $ \case
-        Left err -> Exc.throwError err
-        Right event -> do
-          Pipes.yield event
-          pure . Just . CQRS.identifier $ event
+      mLfi <- (\f -> foldlM f Nothing rows) $
+        \_ (PG.Only identifier :. metadata :. PG.Only encEvent) ->
+          case CQRS.decodeEvent encEvent of
+            Left err -> Exc.throwError $ CQRS.EventDecodingError err
+            Right event -> do
+              Pipes.yield $ CQRS.EventWithContext identifier metadata event
+              pure $ Just identifier
 
       -- Loop unless we're done.
-      when (length eEvents == batchSize) $ go mLfi
+      when (length rows == batchSize) $ go mLfi
 
     fetchBatch
       :: PG.Connection
@@ -136,18 +218,31 @@ streamStreamEvents Stream{..} bounds =
             bounds <> maybe mempty CQRS.afterEvent lastFetchedIdentifier
           conditions = catMaybes
             [ CQRS._afterEvent bounds' <&> \i ->
-                ([sql|{identifierColumn} > ?|], i)
+                (identifierColumn <> " > ?", i)
             , CQRS._untilEvent bounds' <&> \i ->
-                ([sql|{identifierColumn} <= ?|], i)
+                (identifierColumn <> " <= ?", i)
             ]
-          whereClause =
-            mconcat . intersperse [sql| AND |] . map fst $ conditions
-          params = map snd conditions
-          query
-            | whereClause == mempty = selectQuery
+          whereClause
+            | null conditions = mempty
             | otherwise =
-                [sql| SELECT * FROM ({selectQuery}) AS _ WHERE {whereClause}|]
+                ("WHERE " <>)
+                . mconcat
+                . intersperse " AND "
+                . map fst
+                $ conditions
+          params = snd selectQuery :. map snd conditions
+          query =
+            "SELECT * FROM (" <> fst selectQuery <> ") "
+            <> whereClause
+            <> " LIMIT "
+            <> fromString (show batchSize)
+
       PG.query conn query params
 
     batchSize :: Int
     batchSize = 100
+
+handleError
+  :: forall e e' a proxy. (Exception e, Show e)
+  => proxy e -> (String -> e') -> Handler (Either e' a)
+handleError _ f = Handler $ pure . Left . f . show @e

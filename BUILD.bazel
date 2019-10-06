@@ -42,9 +42,10 @@ haskell_library(
     deps = [
         ":eventsourcing",
         "//nix/haskell:base",
+        "//nix/haskell:bytestring",
         "//nix/haskell:mtl",
         "//nix/haskell:pipes",
         "//nix/haskell:postgresql-simple",
-        "//nix/haskell:resource-pool",
+        "//nix/haskell:stm",
     ],
 )
