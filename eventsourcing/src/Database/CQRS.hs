@@ -24,6 +24,9 @@ module Database.CQRS
   , TaskManager
   , runAggregator
 
+    -- * Read models
+  , ReadModel(..)
+
   -- * Errors
   , Error(..)
   ) where
@@ -31,5 +34,6 @@ module Database.CQRS
 import Database.CQRS.Error
 import Database.CQRS.Event
 import Database.CQRS.Projection
+import Database.CQRS.ReadModel
 import Database.CQRS.Stream
 import Database.CQRS.StreamFamily

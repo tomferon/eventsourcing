@@ -1,3 +1,5 @@
+{-# LANGUAGE ScopedTypeVariables #-}
+
 module Database.CQRS.Projection
   ( Projection
   , Aggregator
@@ -39,22 +41,28 @@ type TaskManager event key command =
   Aggregator event (HM.HashMap key command)
 
 runAggregator
-  :: (Monad m, Stream m stream)
-  => Aggregator (EventWithContext' stream) agg
+  :: forall m stream aggregate.
+     ( Monad m
+     , Stream m stream
+     )
+  => Aggregator (EventWithContext' stream) aggregate
   -> stream
   -> StreamBounds' stream
-  -> agg
-  -> m agg
+  -> aggregate
+  -> m (aggregate, Maybe (EventIdentifier stream))
 runAggregator aggregator stream bounds initState = do
-  flip St.execStateT initState . Pipes.runEffect $
+  flip St.execStateT (initState, Nothing) . Pipes.runEffect $
     Pipes.hoist lift (streamEvents stream bounds)
     >->
-    mkPipe aggregator
+    aggregatorPipe
 
   where
-    mkPipe
-      :: Monad m
-      => Aggregator a b -> Pipes.Pipe a Pipes.X (St.StateT b m) ()
-    mkPipe f = do
-      x <- Pipes.await
-      St.modify' . St.execState . f $ x
+    aggregatorPipe
+      :: Pipes.Pipe
+          (EventWithContext' stream) Pipes.X
+          (St.StateT (aggregate, Maybe (EventIdentifier stream)) m) ()
+    aggregatorPipe = do
+      ewc <- Pipes.await
+      St.modify' $ \(aggregate, _) ->
+        let aggregate' = St.execState (aggregator  ewc) aggregate
+        in (aggregate', Just (identifier ewc))
