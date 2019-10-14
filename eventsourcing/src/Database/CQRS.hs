@@ -5,6 +5,7 @@ module Database.CQRS
 
     -- * Streams
   , Stream(..)
+  , WritableStream(..)
   , EventWithContext(..)
   , EventWithContext'
   , MonadMetadata(..)

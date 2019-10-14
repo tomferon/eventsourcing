@@ -10,6 +10,7 @@
 
 module Database.CQRS.Stream
   ( Stream(..)
+  , WritableStream(..)
   , EventWithContext(..)
   , EventWithContext'
   , MonadMetadata(..)
@@ -37,6 +38,15 @@ class Stream f stream where
   -- correlation ID, etc.
   type EventMetadata stream :: *
 
+  -- | Stream all the events within some bounds.
+  --
+  -- Events must be streamed from lowest to greatest identifier.
+  streamEvents
+    :: stream
+    -> StreamBounds' stream
+    -> Pipes.Producer (EventWithContext' stream) f ()
+
+class Stream f stream => WritableStream f stream where
   -- | Append the event to the stream and return the identifier.
   --
   -- The identifier must be greater than the previous events' identifiers.
@@ -45,14 +55,6 @@ class Stream f stream where
     -> EventType stream
     -> EventMetadata stream
     -> f (EventIdentifier stream)
-
-  -- | Stream all the events within some bounds.
-  --
-  -- Events must be streamed from lowest to greatest identifier.
-  streamEvents
-    :: stream
-    -> StreamBounds' stream
-    -> Pipes.Producer (EventWithContext' stream) f ()
 
 -- | Once added to the stream, an event is adorned with an identifier and some
 -- metadata.
@@ -78,7 +80,7 @@ instance Monad m => MonadMetadata () m where
 -- | Get the metadata from the environment, append the event to the store and
 -- return the identifier.
 writeEvent
-  :: (Monad m, MonadMetadata (EventMetadata stream) m, Stream m stream)
+  :: (Monad m, MonadMetadata (EventMetadata stream) m, WritableStream m stream)
   => stream
   -> EventType stream
   -> m (EventIdentifier stream)

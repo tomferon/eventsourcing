@@ -59,15 +59,17 @@ emptyStreamSTM = do
       notify = const $ pure ()
   pure Stream{..}
 
-instance
-    (MonadIO m, Seq.NFData event, Seq.NFData metadata)
-    => CQRS.Stream m (Stream metadata event) where
+instance MonadIO m => CQRS.Stream m (Stream metadata event) where
   type EventType       (Stream metadata event) = event
   type EventIdentifier (Stream metadata event) = Integer -- starting at 1
   type EventMetadata   (Stream metadata event) = metadata
 
-  writeEventWithMetadata = streamWriteEventWithMetadata
   streamEvents = streamStreamEvent
+
+instance
+    (MonadIO m, Seq.NFData event, Seq.NFData metadata)
+    => CQRS.WritableStream m (Stream metadata event) where
+  writeEventWithMetadata = streamWriteEventWithMetadata
 
 streamWriteEventWithMetadata
   :: (MonadIO m, Seq.NFData event, Seq.NFData metadata)

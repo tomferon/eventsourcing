@@ -112,24 +112,35 @@ makeStream' connectionPool selectQuery insertQuery identifierColumn =
   Stream{..}
 
 instance
-    ( CQRS.WritableEvent event
+    ( CQRS.Event event
     , Exc.MonadError CQRS.Error m
     , MonadIO m
     , Ord identifier
     , PG.From.FromField identifier
     , PG.To.ToField identifier
     , PG.From.FromRow metadata
-    , PG.To.ToRow metadata
     , PG.From.FromField (CQRS.EncodingFormat event)
-    , PG.To.ToField (CQRS.EncodingFormat event)
     ) => CQRS.Stream m (Stream identifier metadata event) where
 
   type EventType       (Stream identifier metadata event) = event
   type EventIdentifier (Stream identifier metadata event) = identifier
   type EventMetadata   (Stream identifier metadata event) = metadata
 
+  streamEvents = streamStreamEvents
+
+instance
+    ( CQRS.WritableEvent event
+    , Exc.MonadError CQRS.Error m
+    , MonadIO m
+    , Ord identifier
+    , PG.From.FromField identifier
+    , PG.To.ToField identifier
+    , PG.From.FromField (CQRS.EncodingFormat event)
+    , PG.To.ToField (CQRS.EncodingFormat event)
+    , PG.From.FromRow metadata
+    , PG.To.ToRow metadata
+    ) => CQRS.WritableStream m (Stream identifier metadata event) where
   writeEventWithMetadata = streamWriteEventWithMetadata
-  streamEvents           = streamStreamEvents
 
 streamWriteEventWithMetadata
   :: ( CQRS.WritableEvent event
@@ -163,7 +174,7 @@ streamWriteEventWithMetadata Stream{..} event metadata = do
 
 streamStreamEvents
   :: forall identifier metadata event m.
-     ( CQRS.WritableEvent event
+     ( CQRS.Event event
      , Exc.MonadError CQRS.Error m
      , MonadIO m
      , Ord identifier

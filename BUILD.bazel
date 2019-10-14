@@ -15,7 +15,9 @@ haskell_library(
         "//nix/haskell:hashable",
         "//nix/haskell:mtl",
         "//nix/haskell:pipes",
+        "//nix/haskell:psqueues",
         "//nix/haskell:stm",
+        "//nix/haskell:time",
         "//nix/haskell:unordered-containers",
     ],
 )
