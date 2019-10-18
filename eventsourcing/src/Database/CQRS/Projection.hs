@@ -40,6 +40,7 @@ type EffectfulProjection event action =
 type TaskManager event key command =
   Aggregator event (HM.HashMap key command)
 
+-- | Run an 'Aggregator' on events from a stream starting with a given state.
 runAggregator
   :: forall m stream aggregate.
      ( Monad m
