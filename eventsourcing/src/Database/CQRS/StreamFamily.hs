@@ -26,7 +26,8 @@ class StreamFamily f fam where
   getStream :: fam -> StreamIdentifier fam -> f (StreamType fam)
 
   -- | Initialise and return a producer of newly-created events from *all*
-  -- streams.
+  -- streams in arbitrary batches. If an event can't be decoded, the decoding
+  -- error is returned instead.
   --
   -- Events should appear in the correct order within a given stream but not
   -- necessarily in-between them, i.e. two events belonging to different streams
@@ -35,11 +36,18 @@ class StreamFamily f fam where
   -- It is okay for events to be sent more than one time as long as the order
   -- is respected within each stream if it makes the implementation easier and
   -- prevents the loss of some events.
+  --
+  -- How events are batched together is up to the implementation as long as the
+  -- order is respected.
   allNewEvents
     :: fam
     -> f (Pipes.Producer
-          (StreamIdentifier fam, (EventWithContext' (StreamType fam)))
-          f ())
+          [ ( StreamIdentifier fam
+            , Either
+                (EventIdentifier (StreamType fam), String)
+                (EventWithContext' (StreamType fam))
+            ) ]
+          f a)
 
   -- | Stream the identifier of the latest events for each stream in the family.
   --

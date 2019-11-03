@@ -1,3 +1,5 @@
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
 module Database.CQRS.Projection
@@ -11,11 +13,13 @@ module Database.CQRS.Projection
 import Control.Monad.Trans (lift)
 import Pipes ((>->))
 
-import qualified Control.Monad.State.Strict as St
+import qualified Control.Monad.Except       as Exc
 import qualified Control.Monad.Identity     as Id
+import qualified Control.Monad.State.Strict as St
 import qualified Data.HashMap.Strict        as HM
 import qualified Pipes
 
+import Database.CQRS.Error
 import Database.CQRS.Stream
 
 -- | A projection is simply a function consuming events and producing results
@@ -43,7 +47,8 @@ type TaskManager event key command =
 -- | Run an 'Aggregator' on events from a stream starting with a given state.
 runAggregator
   :: forall m stream aggregate.
-     ( Monad m
+     ( Exc.MonadError Error m
+     , Show (EventIdentifier stream)
      , Stream m stream
      )
   => Aggregator (EventWithContext' stream) aggregate
@@ -54,16 +59,25 @@ runAggregator
 runAggregator aggregator stream bounds initState = do
   flip St.execStateT (initState, Nothing) . Pipes.runEffect $
     Pipes.hoist lift (streamEvents stream bounds)
-    >->
-    aggregatorPipe
+      >-> flatten
+      >-> aggregatorPipe
 
   where
     aggregatorPipe
       :: Pipes.Pipe
-          (EventWithContext' stream) Pipes.X
+          (Either (EventIdentifier stream, String) (EventWithContext' stream))
+          Pipes.X
           (St.StateT (aggregate, Maybe (EventIdentifier stream)) m) ()
     aggregatorPipe = do
-      ewc <- Pipes.await
+      ewc <- Pipes.await >>= \case
+        Left (eventId, err) ->
+          Exc.throwError . EventDecodingError $
+            "event " ++ show eventId ++ ": " ++ err
+        Right e -> pure e
+
       St.modify' $ \(aggregate, _) ->
         let aggregate' = St.execState (aggregator  ewc) aggregate
         in (aggregate', Just (identifier ewc))
+
+flatten :: Monad m => Pipes.Pipe [a] a m ()
+flatten = Pipes.await >>= Pipes.each

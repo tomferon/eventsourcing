@@ -18,7 +18,6 @@ import Control.Concurrent.MVar    (MVar, newEmptyMVar, putMVar, takeMVar)
 import Control.Exception
 import Control.Monad              (forever, void)
 import Control.Monad.Trans        (MonadIO(..))
-import Data.Foldable              (forM_)
 import Data.List                  (intersperse)
 import Data.Proxy                 (Proxy(..))
 import Database.PostgreSQL.Simple ((:.)(..))
@@ -129,7 +128,7 @@ streamFamilyGetStream StreamFamily{..} streamId =
       mconcat . intersperse "," . map (const "?") $ metadataColumns
 
 streamFamilyAllNewEvents
-  :: forall streamId eventId metadata event m.
+  :: forall streamId eventId metadata event m a.
      ( CQRS.Event event
      , Exc.MonadError CQRS.Error m
      , MonadIO m
@@ -142,8 +141,11 @@ streamFamilyAllNewEvents
      )
   => StreamFamily streamId eventId metadata event
   -> m (Pipes.Producer
-        (streamId, CQRS.EventWithContext eventId metadata event)
-        m ())
+        [ ( streamId
+          , Either
+              (eventId, String) (CQRS.EventWithContext eventId metadata event)
+          ) ]
+        m a)
 streamFamilyAllNewEvents StreamFamily{..} = liftIO $ do
     queue     <- STM.newTBQueueIO 100
     queueWeak <- mkWeakPtr queue Nothing
@@ -223,8 +225,11 @@ streamFamilyAllNewEvents StreamFamily{..} = liftIO $ do
       :: MVar CQRS.Error -- Error from listening thread.
       -> STM.TBQueue (streamId, eventId)
       -> Pipes.Producer
-          (streamId, CQRS.EventWithContext eventId metadata event)
-          m ()
+          [ ( streamId
+            , Either
+                (eventId, String) (CQRS.EventWithContext eventId metadata event)
+            ) ]
+          m a
     producer mvar queue = forever $ do
       -- Check the listening thread is still running.
       mErr <- liftIO $ tryTakeMVar mvar
@@ -247,7 +252,10 @@ streamFamilyAllNewEvents StreamFamily{..} = liftIO $ do
     fetchEvents
       :: [(streamId, eventId)]
       -> Pipes.Producer
-          (streamId, CQRS.EventWithContext eventId metadata event)
+          [ ( streamId
+            , Either
+                (eventId, String) (CQRS.EventWithContext eventId metadata event)
+            ) ]
           m ()
     fetchEvents pairs = do
       let pairs' = map (uncurry Pair) pairs
@@ -262,13 +270,17 @@ streamFamilyAllNewEvents StreamFamily{..} = liftIO $ do
 
       rows <- either Exc.throwError pure eRows
 
-      forM_ rows $ \(PG.Only streamId :. PG.Only eventId
-                     :. metadata :. PG.Only encEvent) ->
-        case CQRS.decodeEvent encEvent of
-          Left err -> Exc.throwError $ CQRS.EventDecodingError err
-          Right event -> do
-            let ewc = CQRS.EventWithContext eventId metadata event
-            Pipes.yield (streamId, ewc)
+      Pipes.yield $
+        map
+          (\(PG.Only streamId :. PG.Only identifier
+             :. metadata :. PG.Only encEvent) ->
+            case CQRS.decodeEvent encEvent of
+              Left err -> (streamId, Left (identifier, err))
+              Right event ->
+                ( streamId
+                , Right (CQRS.EventWithContext identifier metadata event)
+                )
+          ) rows
 
     fetchQuery :: PG.Query
     fetchQuery =

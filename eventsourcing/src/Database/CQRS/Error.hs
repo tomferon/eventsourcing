@@ -11,4 +11,5 @@ data Error
   | EventDecodingError String
   | EventRetrievalError String
   | NewEventsStreamingError String
+  | ProjectionError String
   deriving (Eq, Show, Generic)

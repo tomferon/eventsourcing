@@ -14,6 +14,7 @@ module Database.CQRS.ReadModel.AggregateStore
 import Control.Monad.Trans (MonadIO(..))
 import Data.Hashable (Hashable)
 
+import qualified Control.Monad.Except   as Exc
 import qualified Control.Concurrent.STM as STM
 import qualified Data.HashPSQ           as HashPSQ
 import qualified Data.Time              as T
@@ -38,10 +39,12 @@ data AggregateStore streamFamily aggregate = AggregateStore
 instance
     ( CQRS.StreamFamily m streamFamily
     , CQRS.Stream m (CQRS.StreamType streamFamily)
+    , Exc.MonadError CQRS.Error m
     , Hashable (CQRS.StreamIdentifier streamFamily)
     , MonadIO m
     , Ord (CQRS.EventIdentifier (CQRS.StreamType streamFamily))
     , Ord (CQRS.StreamIdentifier streamFamily)
+    , Show (CQRS.EventIdentifier (CQRS.StreamType streamFamily))
     )
     => CQRS.ReadModel m (AggregateStore streamFamily aggregate) where
 
@@ -56,10 +59,12 @@ aggregateStoreQuery
   :: forall m streamFamily aggregate.
      ( CQRS.StreamFamily m streamFamily
      , CQRS.Stream m (CQRS.StreamType streamFamily)
+     , Exc.MonadError CQRS.Error m
      , Hashable (CQRS.StreamIdentifier streamFamily)
      , MonadIO m
      , Ord (CQRS.EventIdentifier (CQRS.StreamType streamFamily))
      , Ord (CQRS.StreamIdentifier streamFamily)
+     , Show (CQRS.EventIdentifier (CQRS.StreamType streamFamily))
      )
   => AggregateStore streamFamily aggregate
   -> CQRS.StreamIdentifier streamFamily

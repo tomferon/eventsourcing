@@ -38,13 +38,20 @@ class Stream f stream where
   -- correlation ID, etc.
   type EventMetadata stream :: *
 
-  -- | Stream all the events within some bounds.
+  -- | Stream all the events within some bounds in arbitrary batches.
   --
-  -- Events must be streamed from lowest to greatest identifier.
+  -- Events must be streamed from lowest to greatest identifier. If the back-end
+  -- is fetching events in batches, they can be returned in the same way to
+  -- improve performace. If the event can't be decoded, a 'Left' should be
+  -- returned instead with the identifier and an error message.
   streamEvents
     :: stream
     -> StreamBounds' stream
-    -> Pipes.Producer (EventWithContext' stream) f ()
+    -> Pipes.Producer
+        [ Either
+            (EventIdentifier stream, String)
+            (EventWithContext' stream)
+        ] f ()
 
 class Stream f stream => WritableStream f stream where
   -- | Append the event to the stream and return the identifier.

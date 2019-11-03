@@ -21,10 +21,9 @@ module Database.CQRS.PostgreSQL.Stream
 import Control.Exception          (Exception, Handler(..), catches)
 import Control.Monad              (when)
 import Control.Monad.Trans        (MonadIO(..))
-import Data.Foldable              (foldlM)
 import Data.Functor               ((<&>))
 import Data.List                  (intersperse)
-import Data.Maybe                 (catMaybes)
+import Data.Maybe                 (catMaybes, listToMaybe)
 import Data.Proxy                 (Proxy(..))
 import Data.String                (fromString)
 import Database.PostgreSQL.Simple ((:.)(..))
@@ -140,6 +139,7 @@ instance
     , PG.From.FromRow metadata
     , PG.To.ToRow metadata
     ) => CQRS.WritableStream m (Stream identifier metadata event) where
+
   writeEventWithMetadata = streamWriteEventWithMetadata
 
 streamWriteEventWithMetadata
@@ -185,14 +185,21 @@ streamStreamEvents
      )
   => Stream identifier metadata event
   -> CQRS.StreamBounds identifier
-  -> Pipes.Producer (CQRS.EventWithContext identifier metadata event) m ()
+  -> Pipes.Producer
+      [ Either
+          (identifier, String) (CQRS.EventWithContext identifier metadata event)
+      ] m ()
 streamStreamEvents Stream{..} bounds =
     go Nothing
 
   where
     go
       :: Maybe identifier
-      -> Pipes.Producer (CQRS.EventWithContext identifier metadata event) m ()
+      -> Pipes.Producer
+          [ Either
+              (identifier, String)
+              (CQRS.EventWithContext identifier metadata event)
+          ] m ()
     go lastFetchedIdentifier = do
       -- Fetch 'batchSize' parsed events from the DB.
       eRows <- liftIO . connectionPool $ \conn ->
@@ -206,16 +213,20 @@ streamStreamEvents Stream{..} bounds =
 
       rows <- either Exc.throwError pure eRows
 
-      -- Yield events accumulating the last event identifier.
-      mLfi <- (\f -> foldlM f Nothing rows) $
-        \_ (PG.Only identifier :. metadata :. PG.Only encEvent) ->
-          case CQRS.decodeEvent encEvent of
-            Left err -> Exc.throwError $ CQRS.EventDecodingError err
-            Right event -> do
-              Pipes.yield $ CQRS.EventWithContext identifier metadata event
-              pure $ Just identifier
+      Pipes.yield $
+        map
+          (\(PG.Only identifier :. metadata :. PG.Only encEvent) ->
+            case CQRS.decodeEvent encEvent of
+              Left err -> Left (identifier, err)
+              Right event ->
+                Right $ CQRS.EventWithContext identifier metadata event
+          ) rows
 
-      -- Loop unless we're done.
+      let mLfi =
+            fmap (\(PG.Only identifier :. _) -> identifier)
+            . listToMaybe
+            . reverse
+            $ rows
       when (length rows == batchSize) $ go mLfi
 
     fetchBatch

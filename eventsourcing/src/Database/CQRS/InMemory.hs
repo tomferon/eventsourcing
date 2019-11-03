@@ -93,7 +93,10 @@ streamStreamEvent
   :: MonadIO m
   => Stream metadata event
   -> CQRS.StreamBounds' (Stream metadata event)
-  -> Pipes.Producer (CQRS.EventWithContext' (Stream metadata event)) m ()
+  -> Pipes.Producer
+      [ Either
+          (Integer, String) (CQRS.EventWithContext' (Stream metadata event))
+      ] m ()
 streamStreamEvent stream bounds = do
     let innerStream = events stream
     go 1 innerStream
@@ -102,11 +105,14 @@ streamStreamEvent stream bounds = do
       :: MonadIO m
       => Integer
       -> InnerStream (event, metadata)
-      -> Pipes.Producer (CQRS.EventWithContext Integer metadata event) m ()
+      -> Pipes.Producer
+          [ Either
+              (Integer, String) (CQRS.EventWithContext Integer metadata event)
+          ] m ()
     go n = \case
       Cons (event, metadata) innerStream -> do
         when (inBounds n) $
-          Pipes.yield $ CQRS.EventWithContext n metadata event
+          Pipes.yield [Right (CQRS.EventWithContext n metadata event)]
         go (n+1) innerStream
       Future var -> do
         mInnerStream <- liftIO . STM.atomically . STM.tryReadTMVar $ var
@@ -199,11 +205,15 @@ streamFamilyGetStream sf@StreamFamily{..} identifier =
       Just stream -> pure stream
 
 streamFamilyAllNewEvents
-  :: forall identifier metadata event m. MonadIO m
+  :: forall identifier metadata event m a. MonadIO m
   => StreamFamily identifier metadata event
   -> m (Pipes.Producer
-        (identifier, CQRS.EventWithContext' (Stream metadata event))
-        m ())
+        [ ( identifier
+          , Either
+              (Integer, String)
+              (CQRS.EventWithContext' (Stream metadata event))
+          ) ]
+        m a)
 streamFamilyAllNewEvents StreamFamily{..} = do
     queue <- initialise
     pure $ producer queue
@@ -217,10 +227,20 @@ streamFamilyAllNewEvents StreamFamily{..} = do
       STM.atomically $ STM.modifyTVar' queues (queueWeak :)
       pure queue
 
-    producer :: STM.TBQueue a -> Pipes.Producer a m ()
+    producer
+      :: STM.TBQueue
+          (identifier, CQRS.EventWithContext' (Stream metadata event))
+      -> Pipes.Producer
+          [ ( identifier
+            , Either
+                (Integer, String)
+                (CQRS.EventWithContext' (Stream metadata event))
+            ) ]
+          m a
     producer queue = forever $ do
-      x <- liftIO . STM.atomically $ STM.readTBQueue queue
-      Pipes.yield x
+      xs <- liftIO . STM.atomically $
+        (:) <$> STM.readTBQueue queue <*> STM.flushTBQueue queue
+      Pipes.yield $ map (fmap Right) xs
 
 streamFamilyLatestEventIdentifiers
   :: MonadIO m

@@ -75,19 +75,24 @@ writingSendsNotification = do
   streamFamily <- CQRS.InMem.emptyStreamFamily @()
   notifStream <- CQRS.allNewEvents streamFamily
 
-  events <- forAll $ Gen.list (Range.linear 1 100) $
+  events <- forAll $ Gen.list (Range.linear 1 1000) $
     (,)
       <$> Gen.integral (Range.linear 1 10)
       <*> Gen.double (Range.linearFrac 100 10000)
 
-  for_ events $ \(streamId, event) -> do
-    stream <- CQRS.getStream streamFamily (streamId :: Int)
-    CQRS.writeEvent stream (event :: Double)
-  notifications <- collect $ Pipes.take (length events) <-< notifStream
+  _ <- liftIO . forkIO $
+    for_ events $ \(streamId, event) -> do
+      stream <- CQRS.getStream streamFamily (streamId :: Int)
+      CQRS.writeEvent stream (event :: Double)
+
+  notifications <- collect $
+    Pipes.take (length events)
+      <-< forever (Pipes.each =<< Pipes.await)
+      <-< notifStream
 
   (\f -> zipWithM_ f events notifications) $
     \(streamId, event) (streamId', ewc) -> do
-      let CQRS.EventWithContext{ CQRS.event = event' } = ewc
+      let Right CQRS.EventWithContext{ CQRS.event = event' } = ewc
       streamId === streamId'
       event    === event'
 

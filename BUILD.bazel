@@ -45,9 +45,11 @@ haskell_library(
         ":eventsourcing",
         "//nix/haskell:base",
         "//nix/haskell:bytestring",
+        "//nix/haskell:hashable",
         "//nix/haskell:mtl",
         "//nix/haskell:pipes",
         "//nix/haskell:postgresql-simple",
         "//nix/haskell:stm",
+        "//nix/haskell:unordered-containers",
     ],
 )
