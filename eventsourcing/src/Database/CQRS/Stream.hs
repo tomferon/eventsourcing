@@ -1,4 +1,5 @@
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DeriveTraversable #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
@@ -103,6 +104,7 @@ data StreamBounds identifier = StreamBounds
   { _afterEvent :: Maybe identifier -- ^ Exclusive.
   , _untilEvent :: Maybe identifier -- ^ Inclusive.
   }
+  deriving (Functor, Foldable, Traversable)
 
 type StreamBounds' stream = StreamBounds (EventIdentifier stream)
 

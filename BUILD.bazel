@@ -12,6 +12,7 @@ haskell_library(
     deps = [
         "//nix/haskell:base",
         "//nix/haskell:deepseq",
+        "//nix/haskell:free",
         "//nix/haskell:hashable",
         "//nix/haskell:mtl",
         "//nix/haskell:pipes",
