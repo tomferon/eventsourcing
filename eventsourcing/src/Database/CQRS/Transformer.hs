@@ -23,10 +23,12 @@ module Database.CQRS.Transformer
   , pushEvent
   , mergeEvents
   , flushEvents
+  , failTransformer
   ) where
 
 import Control.Monad (forM_)
 import Control.Monad.Trans (lift)
+import Data.Functor ((<&>))
 import Data.Hashable (Hashable)
 
 import qualified Data.HashMap.Strict as HM
@@ -35,10 +37,11 @@ import qualified Control.Monad.State as St
 import qualified Pipes
 import qualified Pipes.Prelude       as Pipes
 
-import qualified Database.CQRS as CQRS
+import qualified Database.CQRS.Stream       as CQRS
+import qualified Database.CQRS.StreamFamily as CQRS
 
-type Transformer inputEvent event =
-  inputEvent -> Transform event ()
+type Transformer inputEvent eventId event =
+  inputEvent -> Transform eventId event ()
 
 data TransformedStream m identifier metadata event =
   forall stream. CQRS.Stream m stream => TransformedStream
@@ -47,7 +50,7 @@ data TransformedStream m identifier metadata event =
             (Either
               (CQRS.EventIdentifier stream, String)
               (CQRS.EventWithContext' stream))
-            (CQRS.EventWithContext identifier metadata event)
+            identifier (CQRS.EventWithContext identifier metadata event)
     , inputStream :: stream
     , reverseIdentifier :: identifier -> m (CQRS.EventIdentifier stream)
     }
@@ -58,7 +61,7 @@ transformStream
       (Either
         (CQRS.EventIdentifier stream, String)
         (CQRS.EventWithContext' stream))
-      (CQRS.EventWithContext identifier metadata event)
+      identifier (CQRS.EventWithContext identifier metadata event)
   -> (identifier -> m (CQRS.EventIdentifier stream))
   -> stream
   -> TransformedStream m identifier metadata event
@@ -92,7 +95,9 @@ transformedStreamStreamEvents TransformedStream{..} bounds = do
     (\f -> Pipes.foldM f (pure []) pure inputs) $ \waitingEvents batch -> do
       let (batches, waitingEvents') =
             runTransform waitingEvents . mapM_ transformer $ batch
-      Pipes.each $ map (map Right) batches
+      Pipes.each $ batches <&> \case
+        Left err -> [Left err]
+        Right b -> map Right b
 
       -- If there are too many waiting events, we flush them anyway to avoid
       -- using too much memmory.
@@ -118,7 +123,7 @@ data TransformedStreamFamily m streamId eventId metadata event =
             (Either
               (CQRS.EventIdentifier (CQRS.StreamType streamFamily), String)
               (CQRS.EventWithContext' (CQRS.StreamType streamFamily)))
-            (CQRS.EventWithContext eventId metadata event)
+            eventId (CQRS.EventWithContext eventId metadata event)
     , makeStreamIdentifier
         :: CQRS.StreamIdentifier streamFamily -> m streamId
     , reverseStreamIdentifier
@@ -130,7 +135,8 @@ data TransformedStreamFamily m streamId eventId metadata event =
     }
 
 transformStreamFamily
-  :: ( Hashable (CQRS.StreamIdentifier streamFamily)
+  :: forall m streamId eventId metadata event streamFamily.
+     ( Hashable (CQRS.StreamIdentifier streamFamily)
      , Ord (CQRS.StreamIdentifier streamFamily)
      , CQRS.Stream m (CQRS.StreamType streamFamily)
      , CQRS.StreamFamily m streamFamily
@@ -139,7 +145,7 @@ transformStreamFamily
       (Either
         (CQRS.EventIdentifier (CQRS.StreamType streamFamily), String)
         (CQRS.EventWithContext' (CQRS.StreamType streamFamily)))
-      (CQRS.EventWithContext eventId metadata event)
+      eventId (CQRS.EventWithContext eventId metadata event)
   -> (CQRS.StreamIdentifier streamFamily -> m streamId)
   -> (streamId -> m (CQRS.StreamIdentifier streamFamily))
   -> (CQRS.EventIdentifier (CQRS.StreamType streamFamily) -> m eventId)
@@ -196,8 +202,9 @@ transformedStreamFamilyAllNewEvents TransformedStreamFamily{..} = do
       streamId <- lift $ makeStreamIdentifier inputStreamId
       let (batches, waitingEvents) =
             runTransform [] . mapM_ streamTransformer $ events
-          adorn = map ((streamId,) . Right)
-      Pipes.each $ map adorn (batches ++ [waitingEvents])
+      Pipes.each $ (batches ++ [Right waitingEvents]) <&> \case
+        Left err -> [(streamId, Left err)]
+        Right b -> map ((streamId,) . Right) b
 
 transformedStreamFamilyLatestEventIdentifiers
   :: Monad m
@@ -210,40 +217,55 @@ transformedStreamFamilyLatestEventIdentifiers TransformedStreamFamily{..} = do
     eventId  <- lift $ makeEventIdentifier  inputEventId
     Pipes.yield (streamId, eventId)
 
-data TransformF event a
+data TransformF eventId event a
   = PushEvent a event
   | MergeEvents ([event] -> (a, [event]))
   | FlushEvents a
+  | Failure a eventId String
   deriving Functor
 
 -- | Monad in which you can push, merge and flush events.
-type Transform event = Free.Free (TransformF event)
+type Transform eventId event = Free.Free (TransformF eventId event)
 
 -- | Run the transformation starting with some waiting events and returning
 -- batches of events to flush and a new list of waiting events to be fed to the
--- next call.
-runTransform :: [event] -> Transform event () -> ([[event]], [event])
+-- next call. If the transformer fails, return the error instead.
+--
+-- All given events will be processed except in case of failure.
+runTransform
+  :: [event] -> Transform eventId event ()
+  -> ([Either (eventId, String) [event]], [event])
 runTransform lastWaitingEvents =
     flip St.execState ([], lastWaitingEvents) . Free.foldFree interpreter
+
   where
-    interpreter :: TransformF event a -> St.State ([[event]], [event]) a
+    interpreter
+      :: TransformF eventId event a
+      -> St.State ([Either (eventId, String) [event]], [event]) a
     interpreter = \case
       PushEvent x event -> do
         St.modify $ \(batches, waitingEvents) ->
           (batches, waitingEvents ++ [event])
         pure x
+
       MergeEvents f ->
         St.state $ \(batches, waitingEvents) ->
           let (x, waitingEvents') = f waitingEvents
               st = (batches, waitingEvents')
           in (x, st)
+
       FlushEvents x -> do
         St.modify $ \(batches, waitingEvents) ->
-          (batches ++ [waitingEvents], [])
+          (batches ++ [Right waitingEvents], [])
+        pure x
+
+      Failure x eventId err -> do
+        St.modify $ \(batches, waitingEvents) ->
+          (batches ++ [Right waitingEvents, Left (eventId, err)], [])
         pure x
 
 -- | Push a new event at the end of the queue.
-pushEvent :: event -> Transform event ()
+pushEvent :: event -> Transform eventId event ()
 pushEvent = Free.liftF . PushEvent ()
 
 -- | Apply a function to the queue of event returning a value and a new queue,
@@ -251,12 +273,16 @@ pushEvent = Free.liftF . PushEvent ()
 --
 -- The intent is to allow a new event to be merged in a previous one if possible
 -- to make the new event stream more compact.
-mergeEvents :: ([event] -> (a, [event])) -> Transform event a
+mergeEvents :: ([event] -> (a, [event])) -> Transform eventId event a
 mergeEvents = Free.liftF . MergeEvents
 
 -- | Flush the queue so it can be processed downstream, e.g. sent to a message
 -- broker.
 --
 -- Flushing may also occur automatically.
-flushEvents :: Transform event ()
+flushEvents :: Transform eventId event ()
 flushEvents = Free.liftF $ FlushEvents ()
+
+-- | Flush the events and push an error downstream.
+failTransformer :: eventId -> String -> Transform eventId event ()
+failTransformer eventId err = Free.liftF $ Failure () eventId err

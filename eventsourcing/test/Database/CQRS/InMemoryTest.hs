@@ -8,21 +8,22 @@ module Database.CQRS.InMemoryTest
 import Control.Concurrent (forkIO, killThread, threadDelay)
 import Control.Concurrent.MVar
 import Control.Monad (forever, replicateM_, zipWithM_)
-import Control.Monad.Trans (lift, liftIO)
+import Control.Monad.Trans (liftIO)
 import Data.Foldable (for_, traverse_)
 import Data.List (nub)
 import Data.Traversable (for)
 import Hedgehog hiding (collect)
-import Pipes ((>->), (<-<))
+import Pipes ((<-<))
 import System.Mem (performGC)
 import Test.Tasty
 import Test.Tasty.Hedgehog
 
-import qualified Control.Monad.Writer as W
-import qualified Hedgehog.Gen         as Gen
-import qualified Hedgehog.Range       as Range
+import qualified Hedgehog.Gen   as Gen
+import qualified Hedgehog.Range as Range
 import qualified Pipes
-import qualified Pipes.Prelude as Pipes
+import qualified Pipes.Prelude  as Pipes
+
+import Helpers (collect)
 
 import qualified Database.CQRS          as CQRS
 import qualified Database.CQRS.InMemory as CQRS.InMem
@@ -132,13 +133,3 @@ gcRemovesListener = do
     failed <- liftIO $ isEmptyMVar mvar
     liftIO $ killThread threadId
     failed === False
-
-collect :: Monad m => Pipes.Producer a m () -> m [a]
-collect producer =
-    fmap snd . W.runWriterT . Pipes.runEffect $
-      Pipes.hoist lift producer >-> collector
-  where
-    collector :: W.MonadWriter [a] m => Pipes.Consumer a m ()
-    collector = forever $ do
-      x <- Pipes.await
-      W.tell [x]

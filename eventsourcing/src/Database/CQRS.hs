@@ -28,6 +28,18 @@ module Database.CQRS
     -- * Read models
   , ReadModel(..)
 
+    -- * Transformers
+  , Transformer
+  , TransformedStream
+  , transformStream
+  , TransformedStreamFamily
+  , transformStreamFamily
+  , Transform
+  , pushEvent
+  , mergeEvents
+  , flushEvents
+  , failTransformer
+
   -- * Errors
   , Error(..)
   ) where
@@ -38,3 +50,4 @@ import Database.CQRS.Projection
 import Database.CQRS.ReadModel
 import Database.CQRS.Stream
 import Database.CQRS.StreamFamily
+import Database.CQRS.Transformer
