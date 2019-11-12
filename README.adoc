@@ -1,0 +1,79 @@
+= eventsourcing
+
+This is a library to do CQRS/ES in Haskell. The core library `eventsourcing`
+provides the abstractions and `eventsourcing-postgresql` is the adapater for
+PostgreSQL. Other adapters can be written and would be able to work together.
+
+== Key Concepts
+
+=== Stream
+
+The stream is the most important concept of the library. It represents a
+sequence of ordered events that belongs together. In DDD (Domain-Driven Design)
+terminology, it corresponds to a single aggregate instance.
+
+=== Stream Family
+
+Streams that share a common structure can be brought together into stream
+families index by some stream identifier. In DDD parlance, this would be used
+for aggregate types. Streams in a stream family are pretty much independent from
+each other in the sense that events are only ordered within streams and event
+identifiers can be reused between streams without conflicts.
+
+=== Projection
+
+Projections should be as easy to write and maintain as possible. This is why,
+with `eventsourcing`, the user is expected to write simple functions with a type
+of the following form.
+
+[source,haskell]
+----
+event -> f a
+----
+
+For example, a simple aggregation function has the following type.
+
+[source,haskell]
+----
+EventWithContext eventId metadata event -> State aggregate ()
+----
+
+For projections that populates SQL tables, the type would be as follows.
+
+[source,haskell]
+----
+(streamId, EventWithContext eventId metadata event)
+  -> Identity [TabularDataAction] ()
+----
+
+These functions can then be used by the library or an adapter to be run against
+some stream or stream family.
+
+By keeping these functions simple, they can easily be tested and used in
+different contexts. Want to switch from one adapter to another or use in-memory
+store for your integration tests? No problem.
+
+=== Transformers
+
+Sometimes, you want to transform some streams into other streams. You might want
+to migrate a stream family to get rid of obsolete streams or change the shape of
+some event. Maybe you want to publish events to a message broker but want to
+keep your internal (private) events separate from the (public) events that make
+their way to the broker.
+
+Transformers are functions of the following form where `inputEvent` is events
+(with their context) coming from some stream or stream family and `Transform` is
+a monad in which you can push and merge events together to be sent downstream.
+
+[source,haskell]
+----
+inputEvent -> Transform eventId event ()
+----
+
+== Modules Structure
+
+TODO: Explain what each module contains.
+
+== More In-Depth Information
+
+. xref:doc/migrating.adoc[Migrating] (and archiving) your events.
