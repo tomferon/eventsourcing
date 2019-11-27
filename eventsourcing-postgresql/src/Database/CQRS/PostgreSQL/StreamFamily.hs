@@ -10,7 +10,8 @@
 {-# LANGUAGE UndecidableInstances #-}
 
 module Database.CQRS.PostgreSQL.StreamFamily
-  ( StreamFamily(..)
+  ( StreamFamily
+  , makeStreamFamily
   ) where
 
 import Control.Concurrent
@@ -57,6 +58,18 @@ data StreamFamily streamId eventId metadata event = StreamFamily
   , metadataColumns        :: [PG.Query]
   , eventColumn            :: PG.Query
   }
+
+makeStreamFamily
+  :: (forall a. (PG.Connection -> IO a) -> IO a)
+  -> PG.Query
+  -> PG.Query
+  -> (BS.ByteString -> Either String (streamId, eventId))
+  -> PG.Query
+  -> PG.Query
+  -> [PG.Query]
+  -> PG.Query
+  -> StreamFamily streamId eventId metadata event
+makeStreamFamily = StreamFamily
 
 instance
     ( CQRS.Event event

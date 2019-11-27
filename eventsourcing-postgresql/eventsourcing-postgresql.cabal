@@ -20,6 +20,9 @@ library
     Database.CQRS.PostgreSQL.Stream
     Database.CQRS.PostgreSQL.StreamFamily
 
+  other-modules:
+    Database.CQRS.PostgreSQL.Internal
+
   build-depends:
     base >=4.12 && <4.13,
     bytestring >=0.10,

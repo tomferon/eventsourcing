@@ -24,25 +24,24 @@ import Data.String                (fromString)
 import Database.PostgreSQL.Simple ((:.)(..))
 import Pipes                      ((>->))
 
-import qualified Control.Monad.Except as Exc
-import qualified Control.Monad.Identity as Id
-import qualified Data.Bifunctor as Bifunctor
-import qualified Data.Functor.Compose as Comp
-import qualified Data.HashMap.Strict as HM
-import qualified Database.PostgreSQL.Simple as PG
+import qualified Control.Monad.Except                 as Exc
+import qualified Control.Monad.Identity               as Id
+import qualified Data.Bifunctor                       as Bifunctor
+import qualified Data.Functor.Compose                 as Comp
+import qualified Data.HashMap.Strict                  as HM
+import qualified Database.PostgreSQL.Simple           as PG
 import qualified Database.PostgreSQL.Simple.FromField as PG.From
-import qualified Database.PostgreSQL.Simple.ToField as PG.To
-import qualified Database.PostgreSQL.Simple.ToRow as PG.To
-import qualified Database.PostgreSQL.Simple.Types as PG
+import qualified Database.PostgreSQL.Simple.ToField   as PG.To
+import qualified Database.PostgreSQL.Simple.Types     as PG
 import qualified Pipes
-import qualified Pipes.Prelude as Pipes
+import qualified Pipes.Prelude                        as Pipes
+
+import Database.CQRS.PostgreSQL.Internal
 
 import qualified Database.CQRS as CQRS
 import qualified Database.CQRS.TabularData as CQRS.Tab
 
 type Projection event = CQRS.EffectfulProjection event SqlAction
-
-type SqlAction = (PG.Query, [PG.To.Action])
 
 runProjectionWith
   :: forall streamFamily action m.
@@ -67,7 +66,7 @@ runProjectionWith
   -> ([action] -> [SqlAction])
   -- ^ Transform the custom actions into SQL actions, possibly optimising them.
   -> m ()
-runProjectionWith connectionPool streamFamily projection versionRelation
+runProjectionWith connectionPool streamFamily projection trackingTable
                   transform = do
     newEvents <- CQRS.allNewEvents streamFamily
     Pipes.runEffect $ do
@@ -87,7 +86,7 @@ runProjectionWith connectionPool streamFamily projection versionRelation
       (streamId, eventId) <- Pipes.await
       stream <- lift $ CQRS.getStream streamFamily streamId
       state <-
-        getLastEventId connectionPool versionRelation streamFamily streamId
+        getLastEventId connectionPool trackingTable streamFamily streamId
 
       lift . Pipes.runEffect $ case state of
         NeverRan -> catchUp' streamId stream mempty
@@ -166,8 +165,8 @@ runProjectionWith connectionPool streamFamily projection versionRelation
         Just (eventId, err) -> do
           Exc.liftEither <=< liftIO . connectionPool $ \conn -> do
             let (query, values) =
-                  updateLastEventId
-                    versionRelation streamFamily streamId eventId (Just err)
+                  upsertTrackingTable
+                    trackingTable streamFamily streamId eventId (Just err)
             (const (Right ()) <$> PG.execute conn query values)
               `catches`
                 [ handleError (Proxy @PG.FormatError) CQRS.ProjectionError
@@ -186,8 +185,8 @@ runProjectionWith connectionPool streamFamily projection versionRelation
             appendSqlActions
               [ ("BEGIN", [])
               , appendSqlActions actions
-              , updateLastEventId
-                  versionRelation streamFamily streamId eventId Nothing
+              , upsertTrackingTable
+                  trackingTable streamFamily streamId eventId Nothing
               , ("COMMIT", [])
               ]
 
@@ -202,50 +201,14 @@ runProjectionWith connectionPool streamFamily projection versionRelation
         case eRes of
           Left err -> do
             let (uquery, uvalues) =
-                  updateLastEventId
-                    versionRelation streamFamily streamId eventId (Just err)
+                  upsertTrackingTable
+                    trackingTable streamFamily streamId eventId (Just err)
             (const (Right ()) <$> PG.execute conn uquery uvalues)
               `catches`
                 [ handleError (Proxy @PG.FormatError) CQRS.ProjectionError
                 , handleError (Proxy @PG.SqlError)    CQRS.ProjectionError
                 ]
           Right _ -> pure $ Right ()
-
-updateLastEventId
-  :: ( PG.To.ToField (CQRS.EventIdentifier (CQRS.StreamType streamFamily))
-     , PG.To.ToField (CQRS.StreamIdentifier streamFamily)
-     )
-  => PG.Query
-  -> streamFamily
-  -> CQRS.StreamIdentifier streamFamily
-  -> CQRS.EventIdentifier (CQRS.StreamType streamFamily)
-  -> Maybe String
-  -> SqlAction
-updateLastEventId versionRelation _ streamId eventId mErr =
-  let (updates, updateValues, insertValues) = case mErr of
-        Nothing ->
-          ( "event_id = ?, failed_event_id = NULL, failed_message = NULL"
-          , [PG.To.toField eventId]
-          , PG.To.toRow (streamId, eventId, PG.Null, PG.Null)
-          )
-        Just err ->
-          ( "failed_event_id = ?, failed_message = ?"
-          , PG.To.toRow (eventId, err)
-          , PG.To.toRow (streamId, PG.Null, eventId, err)
-          )
-      query =
-        "INSERT INTO " <> versionRelation
-        <> " (stream_id, event_id, failed_event_id, failed_message)"
-        <> " VALUES (?, ?, ?, ?) ON CONFLICT DO UPDATE SET "
-        <> updates <> " WHERE stream_id = ?"
-  in
-  makeSqlAction query $
-    insertValues ++ updateValues ++ [PG.To.toField streamId]
-
-data ProjectionState identifier
-  = NeverRan
-  | SuccessAt identifier
-  | FailureAt (Maybe identifier) identifier -- ^ Last succeeded at, failed at.
 
 getLastEventId
   :: ( Exc.MonadError CQRS.Error m
@@ -257,20 +220,12 @@ getLastEventId
   -> PG.Query
   -> streamFamily
   -> CQRS.StreamIdentifier streamFamily
-  -> m (ProjectionState
+  -> m (TrackedState
         (CQRS.EventIdentifier (CQRS.StreamType streamFamily)))
-getLastEventId connectionPool versionRelation _ streamId =
+getLastEventId connectionPool trackingTable streamFamily streamId =
   Exc.liftEither <=< liftIO $
-    connectionPool $ \conn -> do
-      let query =
-            "SELECT event_id, failed_event_id FROM "
-            <> versionRelation <> " WHERE stream_id = ?"
-      rows <- PG.query conn query (PG.Only streamId)
-      pure . Right $ case rows of
-        [(Just eventId, Nothing)] -> SuccessAt eventId
-        [(mEventId, Just failedAt)] -> FailureAt mEventId failedAt
-        _ -> NeverRan
-
+    (Right
+     <$> getTrackedState connectionPool trackingTable streamFamily streamId)
     `catches`
       [ handleError (Proxy @PG.FormatError) CQRS.ProjectionError
       , handleError (Proxy @PG.SqlError)    CQRS.ProjectionError
@@ -280,14 +235,6 @@ handleError
   :: forall e e' a proxy. (Exception e, Show e)
   => proxy e -> (String -> e') -> Handler (Either e' a)
 handleError _ f = Handler $ pure . Left . f . show @e
-
-appendSqlActions :: [SqlAction] -> SqlAction
-appendSqlActions = \case
-    [] -> ("", [])
-    action : actions -> foldl step action actions
-  where
-    step :: SqlAction -> SqlAction -> SqlAction
-    step (q1,v1) (q2,v2) = (q1 <> ";" <> q2, v1 ++ v2)
 
 fromTabularDataActions
   :: forall cols. CQRS.Tab.AllColumns PG.To.ToField cols
@@ -353,7 +300,7 @@ fromTabularDataActions relation =
       Bifunctor.bimap
         (\cs -> if null cs
           then ""
-          else mconcat (" WHERE" : intersperse " AND " cs))
+          else mconcat (" WHERE " : intersperse " AND " cs))
         mconcat
       . unzip
       . mconcat
@@ -373,17 +320,3 @@ fromTabularDataActions relation =
       CQRS.Tab.LowerThanOrEqual x -> ("? <= ?", [name, PG.To.toField x])
       CQRS.Tab.GreaterThan x -> ("? > ?", [name, PG.To.toField x])
       CQRS.Tab.GreaterThanOrEqual x -> ("? >= ?", [name, PG.To.toField x])
-
-makeSqlAction :: PG.To.ToRow r => PG.Query -> r -> SqlAction
-makeSqlAction query r = (query, PG.To.toRow r)
-
--- | Return all the 'Right' elements before the first 'Left' and the value of
--- the first 'Left'.
-stopOnLeft :: [Either a b] -> ([b], Maybe a)
-stopOnLeft = go id
-  where
-    go :: ([b] -> [b]) -> [Either a b] -> ([b], Maybe a)
-    go f = \case
-      [] -> (f [], Nothing)
-      Left err : _ -> (f [], Just err)
-      Right x : xs -> go (f . (x:)) xs

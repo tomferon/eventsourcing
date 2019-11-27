@@ -9,6 +9,7 @@
 
 module Database.CQRS.ReadModel.AggregateStore
   ( AggregateStore
+  , makeAggregateStore
   ) where
 
 import Control.Monad.Trans (MonadIO(..))
@@ -35,6 +36,24 @@ data AggregateStore streamFamily aggregate = AggregateStore
                           aggregate
   , lagTolerance     :: T.NominalDiffTime
   }
+
+makeAggregateStore
+  :: MonadIO m
+  => streamFamily
+  -> CQRS.Aggregator
+      (CQRS.EventWithContext' (CQRS.StreamType streamFamily))
+      aggregate
+  -> (CQRS.StreamIdentifier streamFamily -> aggregate)
+  -> T.NominalDiffTime -- ^ Lag tolerance.
+  -> Int -- ^ Maximum number of elements in the cache.
+  -> m (AggregateStore streamFamily aggregate)
+makeAggregateStore streamFamily aggregator initialAggregate lagTolerance
+                   maxSize = do
+  cache <- liftIO . STM.atomically $ do
+    cachedValues <- STM.newTVar HashPSQ.empty
+    size <- STM.newTVar 0
+    pure Cache{..}
+  pure AggregateStore{..}
 
 instance
     ( CQRS.StreamFamily m streamFamily
