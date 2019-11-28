@@ -247,14 +247,14 @@ streamStreamEvents Stream{..} bounds =
           whereClause
             | null conditions = mempty
             | otherwise =
-                ("WHERE " <>)
+                (" WHERE " <>)
                 . mconcat
                 . intersperse " AND "
                 . map fst
                 $ conditions
           params = snd selectQuery :. map snd conditions
           query =
-            "SELECT * FROM (" <> fst selectQuery <> ") "
+            "SELECT * FROM (" <> fst selectQuery <> ") AS _"
             <> whereClause
             <> " LIMIT "
             <> fromString (show batchSize)
