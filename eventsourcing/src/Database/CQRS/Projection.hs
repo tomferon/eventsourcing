@@ -10,6 +10,7 @@ module Database.CQRS.Projection
   , runAggregator
   ) where
 
+import Control.Monad (forever)
 import Control.Monad.Trans (lift)
 import Pipes ((>->))
 
@@ -68,7 +69,7 @@ runAggregator aggregator stream bounds initState = do
           (Either (EventIdentifier stream, String) (EventWithContext' stream))
           Pipes.X
           (St.StateT (aggregate, Maybe (EventIdentifier stream)) m) ()
-    aggregatorPipe = do
+    aggregatorPipe = forever $ do
       ewc <- Pipes.await >>= \case
         Left (eventId, err) ->
           Exc.throwError . EventDecodingError $
