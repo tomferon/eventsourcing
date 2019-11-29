@@ -45,7 +45,9 @@ type EffectfulProjection event action =
 type TaskManager event key command =
   Aggregator event (HM.HashMap key command)
 
--- | Run an 'Aggregator' on events from a stream starting with a given state.
+-- | Run an 'Aggregator' on events from a stream starting with a given state and
+-- return the new aggregate state, the identifier of the last event processed if
+-- any and how many of them were processed.
 runAggregator
   :: forall m stream aggregate.
      ( Exc.MonadError Error m
@@ -56,19 +58,18 @@ runAggregator
   -> stream
   -> StreamBounds' stream
   -> aggregate
-  -> m (aggregate, Maybe (EventIdentifier stream))
+  -> m (aggregate, Maybe (EventIdentifier stream), Int)
 runAggregator aggregator stream bounds initState = do
-  flip St.execStateT (initState, Nothing) . Pipes.runEffect $
+  flip St.execStateT (initState, Nothing, 0) . Pipes.runEffect $
     Pipes.hoist lift (streamEvents stream bounds)
       >-> flatten
       >-> aggregatorPipe
 
   where
     aggregatorPipe
-      :: Pipes.Pipe
+      :: Pipes.Consumer
           (Either (EventIdentifier stream, String) (EventWithContext' stream))
-          Pipes.X
-          (St.StateT (aggregate, Maybe (EventIdentifier stream)) m) ()
+          (St.StateT (aggregate, Maybe (EventIdentifier stream), Int) m) ()
     aggregatorPipe = forever $ do
       ewc <- Pipes.await >>= \case
         Left (eventId, err) ->
@@ -76,9 +77,9 @@ runAggregator aggregator stream bounds initState = do
             "event " ++ show eventId ++ ": " ++ err
         Right e -> pure e
 
-      St.modify' $ \(aggregate, _) ->
+      St.modify' $ \(aggregate, _, eventCount) ->
         let aggregate' = St.execState (aggregator  ewc) aggregate
-        in (aggregate', Just (identifier ewc))
+        in (aggregate', Just (identifier ewc), eventCount + 1)
 
 flatten :: Monad m => Pipes.Pipe [a] a m ()
 flatten = Pipes.await >>= Pipes.each
