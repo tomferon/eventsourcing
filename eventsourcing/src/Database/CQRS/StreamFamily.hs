@@ -39,6 +39,10 @@ class StreamFamily f fam where
   --
   -- How events are batched together is up to the implementation as long as the
   -- order is respected.
+  --
+  -- It is okay for batches to be empty to signal that there are currently no
+  -- new notifications. This is important for migrations, so they know they have
+  -- processed all events.
   allNewEvents
     :: fam
     -> f (Pipes.Producer

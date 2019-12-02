@@ -15,6 +15,7 @@ library
 
   exposed-modules:
     Database.CQRS.PostgreSQL
+    Database.CQRS.PostgreSQL.Migration
     Database.CQRS.PostgreSQL.Projection
     Database.CQRS.PostgreSQL.SQLQuery
     Database.CQRS.PostgreSQL.Stream

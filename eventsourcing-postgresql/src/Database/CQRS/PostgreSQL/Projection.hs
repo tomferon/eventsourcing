@@ -231,11 +231,6 @@ getLastEventId connectionPool trackingTable streamFamily streamId =
       , handleError (Proxy @PG.SqlError)    CQRS.ProjectionError
       ]
 
-handleError
-  :: forall e e' a proxy. (Exception e, Show e)
-  => proxy e -> (String -> e') -> Handler (Either e' a)
-handleError _ f = Handler $ pure . Left . f . show @e
-
 fromTabularDataActions
   :: forall cols. CQRS.Tab.AllColumns PG.To.ToField cols
   => PG.Query -- ^ Relation name.

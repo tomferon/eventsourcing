@@ -8,8 +8,9 @@ import GHC.Generics
 
 data Error
   = EventWriteError String
-  | EventDecodingError String
+  | EventDecodingError String String
   | EventRetrievalError String
   | NewEventsStreamingError String
   | ProjectionError String
+  | MigrationError String
   deriving (Eq, Show, Generic)

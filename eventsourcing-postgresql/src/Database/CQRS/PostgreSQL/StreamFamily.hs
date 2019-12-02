@@ -10,7 +10,7 @@
 {-# LANGUAGE UndecidableInstances #-}
 
 module Database.CQRS.PostgreSQL.StreamFamily
-  ( StreamFamily
+  ( StreamFamily(..)
   , makeStreamFamily
   ) where
 
@@ -250,17 +250,15 @@ streamFamilyAllNewEvents StreamFamily{..} = liftIO $ do
 
       -- Get some events or none after timeout just in case the listening
       -- thread died in the meantime (we don't want to block forever.)
-      mEvents <- liftIO $ race
+      events <- liftIO $ race
         (\tmvar -> STM.atomically $ do
           events <- (:) <$> STM.readTBQueue queue <*> STM.flushTBQueue queue
-          STM.putTMVar tmvar . Right . Just $ events)
+          STM.putTMVar tmvar . Right $ events)
         (\tmvar -> do
           threadDelay 1000000 -- 1 second
-          STM.atomically . STM.putTMVar tmvar . Right $ Nothing)
+          STM.atomically . STM.putTMVar tmvar . Right $ [])
 
-      case mEvents of
-        Nothing -> pure ()
-        Just pairs -> fetchEvents pairs
+      fetchEvents events
 
     fetchEvents
       :: [(streamId, eventId)]
@@ -270,6 +268,7 @@ streamFamilyAllNewEvents StreamFamily{..} = liftIO $ do
                 (eventId, String) (CQRS.EventWithContext eventId metadata event)
             ) ]
           m ()
+    fetchEvents [] = Pipes.yield []
     fetchEvents pairs = do
       let pairs' = map (uncurry Pair) pairs
       eRows <- liftIO . connectionPool $ \conn ->

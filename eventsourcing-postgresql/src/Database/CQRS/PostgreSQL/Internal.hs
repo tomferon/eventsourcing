@@ -2,9 +2,12 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
 
 module Database.CQRS.PostgreSQL.Internal where
 
+import Control.Exception
 import Control.Monad (void)
 
 import qualified Database.PostgreSQL.Simple           as PG
@@ -39,6 +42,11 @@ appendSqlActions = \case
     step :: SqlAction -> SqlAction -> SqlAction
     step (q1,v1) (q2,v2) = (q1 <> ";" <> q2, v1 ++ v2)
 
+handleError
+  :: forall e e' a proxy. (Exception e, Show e)
+  => proxy e -> (String -> e') -> Handler (Either e' a)
+handleError _ f = Handler $ pure . Left . f . show @e
+
 data TrackedState identifier
   = NeverRan
   | SuccessAt identifier
@@ -47,8 +55,8 @@ data TrackedState identifier
 -- | Create tracking table if it doesn't exist already.
 --
 -- A tracking table is a table used to track the last events processed by a
--- projection or a migrator for each stream in a stream family.
--- It allows things like projections to restart from where they have left off.
+-- projection for each stream in a stream family. It allows them to restart from
+-- where they have left off.
 createTrackingTable
   :: (forall r. (PG.Connection -> IO r) -> IO r)
   -> PG.Query -- ^ Table name
@@ -59,7 +67,7 @@ createTrackingTable connectionPool trackingTable streamIdType eventIdType =
   connectionPool $ \conn -> do
     let query =
           "CREATE TABLE IF NOT EXISTS " <> trackingTable
-          <> " ( stream_id " <> streamIdType
+          <> " ( stream_id " <> streamIdType <> " PRIMARY KEY"
           <> " , event_id " <> eventIdType
           <> " , failed_event_id " <> eventIdType
           <> " , failed_message varchar )"

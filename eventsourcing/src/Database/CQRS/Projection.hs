@@ -73,8 +73,7 @@ runAggregator aggregator stream bounds initState = do
     aggregatorPipe = forever $ do
       ewc <- Pipes.await >>= \case
         Left (eventId, err) ->
-          Exc.throwError . EventDecodingError $
-            "event " ++ show eventId ++ ": " ++ err
+          Exc.throwError $ EventDecodingError (show eventId) err
         Right e -> pure e
 
       St.modify' $ \(aggregate, _, eventCount) ->
