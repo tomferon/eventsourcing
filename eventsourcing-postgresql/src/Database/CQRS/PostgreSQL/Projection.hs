@@ -9,12 +9,14 @@
 module Database.CQRS.PostgreSQL.Projection
   ( Projection
   , runProjectionWith
+  , executeSqlActions
+  , executeCustomActions
   , fromTabularDataActions
   , makeSqlAction
   ) where
 
 import Control.Exception
-import Control.Monad              ((<=<), forever, unless)
+import Control.Monad              ((<=<), forever, forM_, unless)
 import Control.Monad.Trans        (MonadIO(..), lift)
 import Data.Hashable              (Hashable)
 import Data.List                  (intersperse)
@@ -26,6 +28,7 @@ import Pipes                      ((>->))
 
 import qualified Control.Monad.Except                 as Exc
 import qualified Control.Monad.Identity               as Id
+import qualified Control.Monad.State.Strict           as St
 import qualified Data.Bifunctor                       as Bifunctor
 import qualified Data.Functor.Compose                 as Comp
 import qualified Data.HashMap.Strict                  as HM
@@ -63,18 +66,26 @@ runProjectionWith
       , CQRS.EventWithContext' (CQRS.StreamType streamFamily)
       ) action
   -> PG.Query -- ^ Relation name used to keep track of where the projection is.
-  -> ([action] -> [SqlAction])
-  -- ^ Transform the custom actions into SQL actions, possibly optimising them.
+  -> (streamFamily
+      -> (forall r. (PG.Connection -> IO r) -> IO r)
+      -> PG.Query
+      -> Pipes.Consumer
+          ( [action]
+          , CQRS.StreamIdentifier streamFamily
+          , CQRS.EventIdentifier (CQRS.StreamType streamFamily)
+          ) m ())
+  -- ^ Commit the custom actions. See 'executeSqlActions' for 'SqlAction's.
+  -- This consumer is expected to update the tracking table accordingly.
   -> m ()
 runProjectionWith connectionPool streamFamily projection trackingTable
-                  transform = do
+                  executeActions = do
     newEvents <- CQRS.allNewEvents streamFamily
     Pipes.runEffect $ do
       CQRS.latestEventIdentifiers streamFamily >-> catchUp
       newEvents
         >-> groupByStream
         >-> projectionPipe
-        >-> executeActions
+        >-> executeActions streamFamily connectionPool trackingTable
 
   where
     catchUp
@@ -110,7 +121,7 @@ runProjectionWith connectionPool streamFamily projection trackingTable
       CQRS.streamEvents stream bounds
         >-> Pipes.map (streamId,)
         >-> projectionPipe
-        >-> executeActions
+        >-> executeActions streamFamily connectionPool trackingTable
 
     groupByStream
       :: Pipes.Pipe
@@ -138,7 +149,7 @@ runProjectionWith connectionPool streamFamily projection trackingTable
                 (CQRS.EventIdentifier (CQRS.StreamType streamFamily), String)
                 (CQRS.EventWithContext' (CQRS.StreamType streamFamily)) ]
           )
-          ( [SqlAction]
+          ( [action]
           , CQRS.StreamIdentifier streamFamily
           , CQRS.EventIdentifier (CQRS.StreamType streamFamily)
           ) m ()
@@ -158,7 +169,7 @@ runProjectionWith connectionPool streamFamily projection trackingTable
       unless (null actions) $ do
         -- There is a last event, otherwise actions would be empty.
         let latestEventId = CQRS.identifier . last $ events
-        Pipes.yield (transform actions, streamId, latestEventId)
+        Pipes.yield (actions, streamId, latestEventId)
 
       case mFirstError of
         Nothing -> pure ()
@@ -173,42 +184,99 @@ runProjectionWith connectionPool streamFamily projection trackingTable
                 , handleError (Proxy @PG.SqlError)    CQRS.ProjectionError
                 ]
 
-    executeActions
-      :: Pipes.Consumer
-          ( [SqlAction]
-          , CQRS.StreamIdentifier streamFamily
-          , CQRS.EventIdentifier (CQRS.StreamType streamFamily)
-          ) m ()
-    executeActions = forever $ do
-      (actions, streamId, eventId) <- Pipes.await
-      let (query, values) =
-            appendSqlActions
-              [ ("BEGIN", [])
-              , appendSqlActions actions
-              , upsertTrackingTable
-                  trackingTable streamFamily streamId eventId Nothing
-              , ("COMMIT", [])
-              ]
+-- | Execute the SQL actions and update the tracking table in one transaction.
+--
+-- The custom actions are transformed into a list of SQL actions by the given
+-- function. See 'fromTabularDataActions' for an example.
+executeSqlActions
+  :: ( Exc.MonadError CQRS.Error m
+     , MonadIO m
+     , PG.To.ToField (CQRS.EventIdentifier (CQRS.StreamType streamFamily))
+     , PG.To.ToField (CQRS.StreamIdentifier streamFamily)
+     )
+  => ([action] -> [SqlAction])
+  -> streamFamily
+  -> (forall r. (PG.Connection -> IO r) -> IO r)
+  -> PG.Query
+  -> Pipes.Consumer
+      ( [action]
+      , CQRS.StreamIdentifier streamFamily
+      , CQRS.EventIdentifier (CQRS.StreamType streamFamily)
+      ) m ()
+executeSqlActions transform streamFamily connectionPool trackingTable =
+  forever $ do
+    (actions, streamId, eventId) <- Pipes.await
 
-      Exc.liftEither <=< liftIO . connectionPool $ \conn -> do
-        eRes <-
-          (Right <$> PG.execute conn query values)
+    let sqlActions = transform actions
+        (query, values) =
+          appendSqlActions
+            [ ("BEGIN", [])
+            , appendSqlActions sqlActions
+            , upsertTrackingTable
+                trackingTable streamFamily streamId eventId Nothing
+            , ("COMMIT", [])
+            ]
+
+    Exc.liftEither <=< liftIO . connectionPool $ \conn -> do
+      eRes <-
+        (Right <$> PG.execute conn query values)
+          `catches`
+            [ handleError (Proxy @PG.FormatError) id
+            , handleError (Proxy @PG.SqlError)    id
+            ]
+
+      case eRes of
+        Left err -> do
+          let (uquery, uvalues) =
+                upsertTrackingTable
+                  trackingTable streamFamily streamId eventId (Just err)
+          (const (Right ()) <$> PG.execute conn uquery uvalues)
             `catches`
-              [ handleError (Proxy @PG.FormatError) id
-              , handleError (Proxy @PG.SqlError)    id
+              [ handleError (Proxy @PG.FormatError) CQRS.ProjectionError
+              , handleError (Proxy @PG.SqlError)    CQRS.ProjectionError
               ]
+        Right _ -> pure $ Right ()
 
-        case eRes of
-          Left err -> do
-            let (uquery, uvalues) =
-                  upsertTrackingTable
-                    trackingTable streamFamily streamId eventId (Just err)
-            (const (Right ()) <$> PG.execute conn uquery uvalues)
-              `catches`
-                [ handleError (Proxy @PG.FormatError) CQRS.ProjectionError
-                , handleError (Proxy @PG.SqlError)    CQRS.ProjectionError
-                ]
-          Right _ -> pure $ Right ()
+-- | Execute custom actions by calling the runner function on each action in
+-- turn and updating the tracking table accordingly.
+executeCustomActions
+  :: ( Exc.MonadError CQRS.Error m
+     , MonadIO m
+     , PG.To.ToField (CQRS.EventIdentifier (CQRS.StreamType streamFamily))
+     , PG.To.ToField (CQRS.StreamIdentifier streamFamily)
+     )
+  => (action -> m (Either String (m ())))
+  -- ^ Run an action returning either an error or a rollback action.
+  -- If any of the rollback actions fail, the others are not run.
+  -- Rollback actions are run in reversed order.
+  -> streamFamily
+  -> (forall r. (PG.Connection -> IO r) -> IO r)
+  -> PG.Query
+  -> Pipes.Consumer
+      ( [action]
+      , CQRS.StreamIdentifier streamFamily
+      , CQRS.EventIdentifier (CQRS.StreamType streamFamily)
+      ) m ()
+executeCustomActions runAction streamFamily connectionPool trackingTable =
+  forever $ do
+    (actions, streamId, eventId) <- Pipes.await
+
+    (eRes, rollbackActions) <- lift . flip St.runStateT [] . Exc.runExceptT $
+      forM_ actions $ \action -> do
+        errOrRollback <- lift . lift . runAction $ action
+        case errOrRollback of
+          Left err -> Exc.throwError err
+          Right rollbackAction -> St.modify' (rollbackAction :)
+
+    lift $ case eRes of
+      Left err -> do
+        doUpsertTrackingTable
+          connectionPool trackingTable streamFamily streamId eventId (Just err)
+        sequence_ rollbackActions
+
+      Right () ->
+        doUpsertTrackingTable
+          connectionPool trackingTable streamFamily streamId eventId Nothing
 
 getLastEventId
   :: ( Exc.MonadError CQRS.Error m

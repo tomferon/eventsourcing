@@ -10,27 +10,6 @@
 -- can be added to the stream. Having two different typeclasses allows us to
 -- prevent a subset of events to be written as in the following example.
 --
--- $unwritable_events
-
-module Database.CQRS.Event
-  ( Event(..)
-  , WritableEvent(..)
-  ) where
-
--- | Event that can read from some event stream with compatible decoding format
--- and fed to a projection or aggregated in some way.
-class Event e where
-  -- | Format in which the event is encoded, e.g. 'Data.Aeson.Value'.
-  type EncodingFormat e :: *
-  decodeEvent :: EncodingFormat e -> Either String e
-
--- | Event that can be written to an event stream. This is separate from 'Event'
--- to make it possible to restrict the events that can be written with a GADT.
-class Event e => WritableEvent e where
-  -- | Format from which the event can be decoded, e.g. 'Data.Aeson.Value'.
-  encodeEvent :: e -> EncodingFormat e
-
--- $unwritable_events
 -- @
 --  data Current
 --  data Deprecated
@@ -51,3 +30,21 @@ class Event e => WritableEvent e where
 --  instance TypeError (Text "Cannot write deprecated event")
 --      => WritableEvent (MyEvent Deprecated)
 -- @
+
+module Database.CQRS.Event
+  ( Event(..)
+  , WritableEvent(..)
+  ) where
+
+-- | Event that can read from some event stream with compatible decoding format
+-- and fed to a projection or aggregated in some way.
+class Event e where
+  -- | Format in which the event is encoded, e.g. 'Data.Aeson.Value'.
+  type EncodingFormat e :: *
+  decodeEvent :: EncodingFormat e -> Either String e
+
+-- | Event that can be written to an event stream. This is separate from 'Event'
+-- to make it possible to restrict the events that can be written with a GADT.
+class Event e => WritableEvent e where
+  -- | Format from which the event can be decoded, e.g. 'Data.Aeson.Value'.
+  encodeEvent :: e -> EncodingFormat e

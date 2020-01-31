@@ -8,8 +8,11 @@
 module Database.CQRS.PostgreSQL.Internal where
 
 import Control.Exception
-import Control.Monad (void)
+import Control.Monad ((<=<), void)
+import Control.Monad.Trans
+import Data.Proxy (Proxy(..))
 
+import qualified Control.Monad.Except                 as Exc
 import qualified Database.PostgreSQL.Simple           as PG
 import qualified Database.PostgreSQL.Simple.FromField as PG.From
 import qualified Database.PostgreSQL.Simple.ToField   as PG.To
@@ -125,3 +128,28 @@ upsertTrackingTable trackingTable _ streamId eventId mErr =
   in
   makeSqlAction query $
     insertValues ++ updateValues ++ [PG.To.toField streamId]
+
+-- | Update the tracking table for the given stream.
+doUpsertTrackingTable
+  :: ( Exc.MonadError CQRS.Error m
+     , MonadIO m
+     , PG.To.ToField (CQRS.EventIdentifier (CQRS.StreamType streamFamily))
+     , PG.To.ToField (CQRS.StreamIdentifier streamFamily)
+     )
+  => (forall r. (PG.Connection -> IO r) -> IO r)
+  -> PG.Query -- ^ Name of tracking table.
+  -> streamFamily
+  -> CQRS.StreamIdentifier streamFamily
+  -> CQRS.EventIdentifier (CQRS.StreamType streamFamily)
+  -> Maybe String -- ^ The error message if it failed.
+  -> m ()
+doUpsertTrackingTable connectionPool trackingTable streamFamily streamId eventId
+                      mErr = do
+  Exc.liftEither <=< liftIO . connectionPool $ \conn -> do
+    let (uquery, uvalues) =
+          upsertTrackingTable trackingTable streamFamily streamId eventId mErr
+    (const (Right ()) <$> PG.execute conn uquery uvalues)
+      `catches`
+        [ handleError (Proxy @PG.FormatError) CQRS.ProjectionError
+        , handleError (Proxy @PG.SqlError)    CQRS.ProjectionError
+        ]
