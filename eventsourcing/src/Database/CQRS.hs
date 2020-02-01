@@ -22,7 +22,6 @@ module Database.CQRS
   , Projection
   , Aggregator
   , EffectfulProjection
-  , TaskManager
   , runAggregator
 
     -- * Read models

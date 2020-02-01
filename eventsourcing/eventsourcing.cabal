@@ -24,6 +24,7 @@ library
     Database.CQRS.Stream
     Database.CQRS.StreamFamily
     Database.CQRS.TabularData
+    Database.CQRS.TaskManager
     Database.CQRS.Transformer
 
   build-depends:

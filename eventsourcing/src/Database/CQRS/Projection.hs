@@ -6,7 +6,6 @@ module Database.CQRS.Projection
   ( Projection
   , Aggregator
   , EffectfulProjection
-  , TaskManager
   , runAggregator
   ) where
 
@@ -17,7 +16,6 @@ import Pipes ((>->))
 import qualified Control.Monad.Except       as Exc
 import qualified Control.Monad.Identity     as Id
 import qualified Control.Monad.State.Strict as St
-import qualified Data.HashMap.Strict        as HM
 import qualified Pipes
 
 import Database.CQRS.Error
@@ -37,13 +35,6 @@ type Aggregator event agg =
 -- This can be used to batch changes to tables in a database for example.
 type EffectfulProjection event action =
   event -> Id.Identity [action]
-
--- | Projection deriving a list of commands from a stream of events.
---
--- Each command is identified by a unique key. This key is used when persisting
--- the commands and synchronising work between task runners.
-type TaskManager event key command =
-  Aggregator event (HM.HashMap key command)
 
 -- | Run an 'Aggregator' on events from a stream starting with a given state and
 -- return the new aggregate state, the identifier of the last event processed if
