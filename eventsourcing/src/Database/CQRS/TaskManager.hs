@@ -77,7 +77,7 @@ runTaskManager streamFamily mkInitState taskManager runAction = do
       Just nextRun -> liftIO $ do
         now <- T.getCurrentTime
         when (now < nextRun) $
-          threadDelay . round $ T.diffUTCTime nextRun now
+          threadDelay . (1000000*) . round $ T.diffUTCTime nextRun now
 
   where
     streamProcessor
