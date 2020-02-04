@@ -72,4 +72,4 @@ runAggregator aggregator stream bounds initState = do
         in (aggregate', Just (identifier ewc), eventCount + 1)
 
 flatten :: Monad m => Pipes.Pipe [a] a m ()
-flatten = Pipes.await >>= Pipes.each
+flatten = forever $ Pipes.await >>= Pipes.each
