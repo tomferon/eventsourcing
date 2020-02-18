@@ -22,7 +22,11 @@
 -- table (it can be a 'Table' but also a SQL relation.)
 --
 -- @
--- type User f = Tuple f ['("user_id", Int), '("email", String), ("admin", Bool)]
+-- type User f =
+--   Tuple f ['("user_id", Int), '("email", String), '("admin", Bool)]
+--
+-- completeUser :: User Identity
+-- completeUser = 3 ~: "admin@example.com" ~: True ~: empty
 --
 -- incompleteUser :: User Last
 -- incompleteUser = field @"admin" True <> field @"email" "admin@example.com"
@@ -42,6 +46,8 @@ module Database.CQRS.TabularData
   , optimiseActions
   , Condition(..)
   , Tuple(..)
+  , (~:)
+  , empty
   , Table
   , field
   , ffield
@@ -175,6 +181,14 @@ type Table cols = [Tuple Id.Identity cols]
 data Tuple :: (Type -> Type) -> [(Symbol, Type)] -> Type where
   Nil  :: Tuple f '[]
   Cons :: f a -> Tuple f cols -> Tuple f ('(sym, a) ': cols)
+
+(~:) :: Applicative f => a -> Tuple f cols -> Tuple f ('(sym, a) ': cols)
+(~:) x xs = Cons (pure x) xs
+
+infixr 5 ~:
+
+empty :: Tuple f '[]
+empty = Nil
 
 -- | Create a tuple with the given field set to the given value.
 --
