@@ -123,11 +123,10 @@ upsertTrackingTable trackingTable _ streamId eventId mErr =
       query =
         "INSERT INTO " <> trackingTable
         <> " (stream_id, event_id, failed_event_id, failed_message)"
-        <> " VALUES (?, ?, ?, ?) ON CONFLICT DO UPDATE SET "
-        <> updates <> " WHERE stream_id = ?"
+        <> " VALUES (?, ?, ?, ?) ON CONFLICT (stream_id) DO UPDATE SET "
+        <> updates
   in
-  makeSqlAction query $
-    insertValues ++ updateValues ++ [PG.To.toField streamId]
+  makeSqlAction query $ insertValues ++ updateValues
 
 -- | Update the tracking table for the given stream.
 doUpsertTrackingTable
