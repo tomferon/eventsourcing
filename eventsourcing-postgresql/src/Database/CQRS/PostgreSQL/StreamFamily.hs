@@ -17,12 +17,12 @@ module Database.CQRS.PostgreSQL.StreamFamily
 import Control.Concurrent
 import Control.Concurrent.MVar    (MVar, newEmptyMVar, putMVar, takeMVar)
 import Control.Exception
-import Control.Monad              (forever, void)
+import Control.Monad              (void)
 import Control.Monad.Trans        (MonadIO(..))
 import Data.List                  (intersperse)
 import Data.Proxy                 (Proxy(..))
 import Database.PostgreSQL.Simple ((:.)(..))
-import System.Mem.Weak            (Weak, deRefWeak, mkWeakPtr)
+import System.Mem.Weak            (Weak, deRefWeak, mkWeak)
 
 import qualified Control.Concurrent.STM                  as STM
 import qualified Control.Monad.Except                    as Exc
@@ -140,6 +140,8 @@ streamFamilyGetStream StreamFamily{..} streamId =
     metadataMarks =
       mconcat . intersperse "," . map (const "?") $ metadataColumns
 
+data GCKey = GCKey
+
 streamFamilyAllNewEvents
   :: forall streamId eventId metadata event m a.
      ( CQRS.Event event
@@ -160,10 +162,11 @@ streamFamilyAllNewEvents
           ) ]
         m a)
 streamFamilyAllNewEvents StreamFamily{..} = liftIO $ do
+    let gcKey = GCKey
     queue     <- STM.newTBQueueIO 100
-    queueWeak <- mkWeakPtr queue Nothing
+    queueWeak <- mkWeak gcKey queue Nothing
     mvar      <- startListeningThread queueWeak
-    pure $ producer mvar queue
+    pure $ producer gcKey mvar queue
 
   where
     -- Start the listening thread and return an 'MVar' of potential error of the
@@ -235,7 +238,8 @@ streamFamilyAllNewEvents StreamFamily{..} = liftIO $ do
     -- Producer that repeatedly checks the listening thread is still alive and
     -- fetch corresponding events to the notifications.
     producer
-      :: MVar CQRS.Error -- Error from listening thread.
+      :: GCKey
+      -> MVar CQRS.Error -- Error from listening thread.
       -> STM.TBQueue (streamId, eventId)
       -> Pipes.Producer
           [ ( streamId
@@ -243,7 +247,7 @@ streamFamilyAllNewEvents StreamFamily{..} = liftIO $ do
                 (eventId, String) (CQRS.EventWithContext eventId metadata event)
             ) ]
           m a
-    producer mvar queue = forever $ do
+    producer gcKey mvar queue = do
       -- Check the listening thread is still running.
       mErr <- liftIO $ tryTakeMVar mvar
       maybe (pure ()) Exc.throwError mErr
@@ -259,6 +263,7 @@ streamFamilyAllNewEvents StreamFamily{..} = liftIO $ do
           STM.atomically . STM.putTMVar tmvar . Right $ [])
 
       fetchEvents events
+      producer gcKey mvar queue
 
     fetchEvents
       :: [(streamId, eventId)]
