@@ -93,7 +93,7 @@ runProjectionWith connectionPool streamFamily projection trackingTable
           ( CQRS.StreamIdentifier streamFamily
           , CQRS.EventIdentifier (CQRS.StreamType streamFamily)
           ) m ()
-    catchUp = do
+    catchUp = forever $ do
       (streamId, eventId) <- Pipes.await
       stream <- lift $ CQRS.getStream streamFamily streamId
       state <-
