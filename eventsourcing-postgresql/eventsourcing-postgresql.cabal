@@ -25,7 +25,7 @@ library
     Database.CQRS.PostgreSQL.Internal
 
   build-depends:
-    base >=4.12 && <4.13,
+    base >=4.12 && <5,
     bytestring >=0.10,
     eventsourcing,
     hashable,

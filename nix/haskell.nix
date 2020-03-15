@@ -3,14 +3,9 @@
 let
   inherit (nixpkgs) pkgs;
 
-  ghcVersion = "ghc865";
+  ghcVersion = "ghc883";
 
-  hsPkgs = pkgs.haskell.packages.${ghcVersion}.override {
-    overrides = self: super: {
-      hedgehog       = self.callHackage "hedgehog" "1.0" {};
-      tasty-hedgehog = self.callHackage "tasty-hedgehog" "1.0.0.1" {};
-    };
-  };
+  hsPkgs = pkgs.haskell.packages.${ghcVersion};
 
   packages = {
     inherit (hsPkgs)

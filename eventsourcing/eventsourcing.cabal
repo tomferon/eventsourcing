@@ -28,7 +28,7 @@ library
     Database.CQRS.Transformer
 
   build-depends:
-    base >=4.12 && <4.13,
+    base >=4.12 && <5,
     deepseq >=1.4,
     free >=5,
     hashable,
