@@ -61,7 +61,7 @@ runTaskManager
   -> m ()
 runTaskManager streamFamily mkInitState taskManager runAction = do
   as <- CQRS.AS.makeAggregateStore
-    streamFamily taskManager (([],) . mkInitState) 0.1 1000
+    streamFamily taskManager (([],) . mkInitState) 0 1000
 
   forever $ do
     -- Next run in 5 minutes (unless changed.)
