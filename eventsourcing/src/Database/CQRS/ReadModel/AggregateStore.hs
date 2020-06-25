@@ -105,7 +105,7 @@ aggregateStoreQuery AggregateStore{..} streamId = do
 
     case HashPSQ.lookup streamId hpsq of
       Just (lastUpToDateTime, item@CacheItem{..}) -> do
-        if now <= T.addUTCTime lagTolerance lastUpToDateTime
+        if now < T.addUTCTime lagTolerance lastUpToDateTime
           then
             pure Response
               { lastEventId = Just cachedLastEventId
