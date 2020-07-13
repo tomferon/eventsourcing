@@ -7,6 +7,7 @@
 
 module Database.CQRS.PostgreSQL.Internal where
 
+import Control.Applicative ((<|>))
 import Control.Exception
 import Control.Monad ((<=<), void)
 import Control.Monad.Trans
@@ -50,10 +51,11 @@ handleError
   => proxy e -> (String -> e') -> Handler (Either e' a)
 handleError _ f = Handler $ pure . Left . f . show @e
 
-data TrackedState identifier
+data TrackedState identifier st
   = NeverRan
-  | SuccessAt identifier
-  | FailureAt (Maybe identifier) identifier -- ^ Last succeeded at, failed at.
+  | SuccessAt identifier st
+  | FailureAt (Maybe (identifier, st)) identifier
+    -- ^ Last succeeded at, failed at.
 
 -- | Create tracking table if it doesn't exist already.
 --
@@ -65,65 +67,95 @@ createTrackingTable
   -> PG.Query -- ^ Table name
   -> PG.Query -- ^ Type of stream identifiers.
   -> PG.Query -- ^ Type of event identifiers.
+  -> PG.Query -- ^ Type of the state.
   -> IO ()
-createTrackingTable connectionPool trackingTable streamIdType eventIdType =
+createTrackingTable
+    connectionPool trackingTable streamIdType eventIdType stateType =
   connectionPool $ \conn -> do
     let query =
           "CREATE TABLE IF NOT EXISTS " <> trackingTable
           <> " ( stream_id " <> streamIdType <> " PRIMARY KEY"
           <> " , event_id " <> eventIdType
           <> " , failed_event_id " <> eventIdType
-          <> " , failed_message varchar )"
+          <> " , failed_message varchar"
+          <> " , state " <> stateType <> ")"
     void $ PG.execute_ conn query
+
+-- | An alternative to 'Maybe st'.
+--
+-- If we use 'Maybe st' and 'st ~ Maybe a' (or something else where @NULL@ is a
+-- valid state,) then 'getTrackedState''s @SELECT@ statement would return a
+-- value of type 'Maybe (Maybe a)' which would be 'Nothing' instead of
+-- 'Just Nothing' if the column is 'NULL.
+--
+-- This type works differently: it tries to use 'PG.From.fromField' on the field
+-- and return 'NoState' if it didn't work AND it is @NULL@. Otherwise, it fails.
+data OptionalState st = SomeState st | NoState
+
+instance PG.From.FromField st => PG.From.FromField (OptionalState st) where
+  fromField f mBS =
+    case mBS of
+      Nothing -> (SomeState <$> PG.From.fromField f mBS) <|> pure NoState
+      Just _  -> SomeState <$> PG.From.fromField f mBS
+
+fromOptionalState :: OptionalState a -> Maybe a
+fromOptionalState = \case
+  SomeState x -> Just x
+  NoState     -> Nothing
 
 -- | Get the tracked state of a stream in a family from a tracking table.
 getTrackedState
   :: ( PG.From.FromField (CQRS.EventIdentifier (CQRS.StreamType streamFamily))
+     , PG.From.FromField st
      , PG.To.ToField (CQRS.StreamIdentifier streamFamily)
      )
   => (forall r. (PG.Connection -> IO r) -> IO r)
   -> PG.Query
   -> streamFamily
   -> CQRS.StreamIdentifier streamFamily
-  -> IO (TrackedState (CQRS.EventIdentifier (CQRS.StreamType streamFamily)))
+  -> IO (TrackedState (CQRS.EventIdentifier (CQRS.StreamType streamFamily)) st)
 getTrackedState connectionPool trackingTable _ streamId =
   connectionPool $ \conn -> do
     let query =
-          "SELECT event_id, failed_event_id FROM "
+          "SELECT event_id, failed_event_id, state FROM "
           <> trackingTable <> " WHERE stream_id = ?"
     rows <- PG.query conn query (PG.Only streamId)
     pure $ case rows of
-      [(Just eventId, Nothing)] -> SuccessAt eventId
-      [(mEventId, Just failedAt)] -> FailureAt mEventId failedAt
+      [(Just eventId, Nothing, SomeState state)] -> SuccessAt eventId state
+      [(mEventId, Just failedAt, oState)] ->
+        FailureAt ((,) <$> mEventId <*> fromOptionalState oState) failedAt
       _ -> NeverRan
 
 -- | Return SQL query to upsert a row in a tracking table.
 upsertTrackingTable
   :: ( PG.To.ToField (CQRS.EventIdentifier (CQRS.StreamType streamFamily))
      , PG.To.ToField (CQRS.StreamIdentifier streamFamily)
+     , PG.To.ToField st
      )
   => PG.Query -- ^ Name of tracking table.
   -> streamFamily
   -> CQRS.StreamIdentifier streamFamily
   -> CQRS.EventIdentifier (CQRS.StreamType streamFamily)
-  -> Maybe String -- ^ The error message if it failed.
+  -> Either String st -- ^ The new state or the error message if it failed.
   -> SqlAction
-upsertTrackingTable trackingTable _ streamId eventId mErr =
-  let (updates, updateValues, insertValues) = case mErr of
-        Nothing ->
-          ( "event_id = ?, failed_event_id = NULL, failed_message = NULL"
-          , [PG.To.toField eventId]
-          , PG.To.toRow (streamId, eventId, PG.Null, PG.Null)
-          )
-        Just err ->
-          ( "failed_event_id = ?, failed_message = ?"
-          , PG.To.toRow (eventId, err)
-          , PG.To.toRow (streamId, PG.Null, eventId, err)
-          )
+upsertTrackingTable trackingTable _ streamId eventId eState =
+  let (updates, updateValues, insertValues) =
+        case eState of
+          Right state ->
+            ( "event_id = ?, failed_event_id = NULL,\
+              \ failed_message = NULL, state = ?"
+            , [PG.To.toField eventId, PG.To.toField state]
+            , PG.To.toRow (streamId, eventId, PG.Null, PG.Null, state)
+            )
+          Left err ->
+            ( "failed_event_id = ?, failed_message = ?"
+            , PG.To.toRow (eventId, err)
+            , PG.To.toRow (streamId, PG.Null, eventId, err, PG.Null)
+            )
       query =
         "INSERT INTO " <> trackingTable
-        <> " (stream_id, event_id, failed_event_id, failed_message)"
-        <> " VALUES (?, ?, ?, ?) ON CONFLICT (stream_id) DO UPDATE SET "
+        <> " (stream_id, event_id, failed_event_id, failed_message, state)"
+        <> " VALUES (?, ?, ?, ?, ?) ON CONFLICT (stream_id) DO UPDATE SET "
         <> updates
   in
   makeSqlAction query $ insertValues ++ updateValues
@@ -134,19 +166,20 @@ doUpsertTrackingTable
      , MonadIO m
      , PG.To.ToField (CQRS.EventIdentifier (CQRS.StreamType streamFamily))
      , PG.To.ToField (CQRS.StreamIdentifier streamFamily)
+     , PG.To.ToField st
      )
   => (forall r. (PG.Connection -> IO r) -> IO r)
   -> PG.Query -- ^ Name of tracking table.
   -> streamFamily
   -> CQRS.StreamIdentifier streamFamily
   -> CQRS.EventIdentifier (CQRS.StreamType streamFamily)
-  -> Maybe String -- ^ The error message if it failed.
+  -> Either String st -- ^ The new state or the error message if it failed.
   -> m ()
-doUpsertTrackingTable connectionPool trackingTable streamFamily streamId eventId
-                      mErr = do
+doUpsertTrackingTable
+    connectionPool trackingTable streamFamily streamId eventId eState = do
   Exc.liftEither <=< liftIO . connectionPool $ \conn -> do
     let (uquery, uvalues) =
-          upsertTrackingTable trackingTable streamFamily streamId eventId mErr
+          upsertTrackingTable trackingTable streamFamily streamId eventId eState
     (const (Right ()) <$> PG.execute conn uquery uvalues)
       `catches`
         [ handleError (Proxy @PG.FormatError) CQRS.ProjectionError

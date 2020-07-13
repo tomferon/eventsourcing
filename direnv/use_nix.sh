@@ -109,7 +109,7 @@ use_nix() {
   # want to persist environment variables coming from the shell at the time of
   # the dump. See https://github.com/direnv/direnv/issues/405 for context.
   local path_backup="${PATH}"
-  eval $(cat "${dump}")
+  source "${dump}"
   export PATH="${PATH}:${path_backup}"
 
   # cleanup the environment of variables that are not required, or are causing issues.

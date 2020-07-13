@@ -14,7 +14,6 @@ import Control.Monad.Trans (lift)
 import Pipes ((>->))
 
 import qualified Control.Monad.Except       as Exc
-import qualified Control.Monad.Identity     as Id
 import qualified Control.Monad.State.Strict as St
 import qualified Pipes
 
@@ -33,8 +32,8 @@ type Aggregator event agg =
 -- | Projection returning actions that can be batched and executed.
 --
 -- This can be used to batch changes to tables in a database for example.
-type EffectfulProjection event action =
-  event -> Id.Identity [action]
+type EffectfulProjection event st action =
+  event -> St.State st [action]
 
 -- | Run an 'Aggregator' on events from a stream starting with a given state and
 -- return the new aggregate state, the identifier of the last event processed if
