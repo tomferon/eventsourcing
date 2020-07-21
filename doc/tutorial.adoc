@@ -1,0 +1,305 @@
+= Guided tutorial
+
+This tutorial's purpose is to give you an overview of how to use `eventsourcing`
+in practice. It shows how to create new events and get the aggregate using
+PostgreSQL to store the events.
+
+This assumes you are familiar with the key concepts explained in the
+xref:../README.adoc[README].
+
+As an example, we want to store events related to billing accounts (each billing
+account has an ID) and projects the current balance.
+
+== Database setup
+
+We need a table to store the events. Let's call it, unoriginally,
+`billing_account_events`.
+
+We also need a notification channel to be notified of new events. This is
+actually not used in this simple example but is a requirement to create a
+`StreamFamily`.
+
+For performance reasons, we also want an index on
+`(billing_account_id, event_id)`.
+
+[source,sql]
+----
+CREATE TABLE billing_account_events (
+  billing_account_id varchar NOT NULL,
+  event_id serial NOT NULL PRIMARY KEY,
+  event jsonb NOT NULL,
+  creation_time datetime with time zone NOT NULL
+);
+
+CREATE INDEX billing_account_family_index
+  ON billing_account_events (billing_account_id, event_id);
+
+CREATE FUNCTION notify_billing_account_new_events() RETURNS trigger AS $$
+DECLARE
+  payload jsonb;
+BEGIN
+  payload := json_build_object(
+    'streamId', NEW.billing_account_id,
+    'eventId', NEW.event_id
+  );
+  PERFORM pg_notify('billing_account_new_events', payload::text);
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER notify_billing_account_new_events_trigger
+  AFTER INSERT ON billing_account_events
+  FOR EACH ROW
+  EXECUTE PROCEDURE notify_billing_account_new_events();
+----
+
+== Event definitions
+
+To make things simple, only two things can happen to a billing account: some
+money is debited or credited from the account.
+
+There is a bit of boilerplate here. The interesting bits are the definition of
+`BillingAccountEvent` which is going to be used as the type of events for the
+stream family and the instance of `Event` and `WritableEvent`. These two
+typeclasses are used to decode and encode (resp.) events. The library doesn't
+care how the events are encoded. Here, we use JSON. If `WritableEvent` is not
+implemented, the stream family will be read only.
+
+[source,haskell]
+----
+import Data.Aeson ((.=), (.:))
+import Data.Fixed
+
+import qualified Data.Aeson    as Ae
+import qualified Database.CQRS as CQRS
+
+data BillingAccountEvent
+  = MoneyCredited MoneyCreditedEvent
+  | MoneyDebited MoneyDebitedEvent
+
+instance CQRS.Event BillingAccountEvent where
+  type EncodingFormat BillingAccountEvent = Ae.Value
+  decodeEvent = Ae.parseEither Ae.parseJSON
+
+instance CQRS.WritableEvent BillingAccountEvent where
+  encodeEvent = Ae.toJSON
+
+instance Ae.ToJSON BillingAccountEvent where
+  toJSON = -- ...
+
+instance Ae.FromJSON BillingAccountEvent where
+  parseJSON = -- ...
+
+newtype MoneyCreditedEvent = MoneyCreditedEvent
+  { amount :: Fixed E2
+  }
+
+instance Ae.ToJSON MoneyCreditedEvent where
+  toJSON = -- ...
+
+instance Ae.FromJSON MoneyCreditedEvent where
+  parseJSON = -- ...
+
+newtype MoneyDebitedEvent = MoneyDebitedEvent
+  { amount :: Fixed E2
+  }
+
+instance Ae.ToJSON MoneyDebitedEvent where
+  toJSON = -- ...
+
+instance Ae.FromJSON MoneyDebitedEvent where
+  parseJSON = -- ...
+----
+
+I would advise against deriving the instances of `ToJSON` and `FromJSON`
+automatically since it can hide the fact that `FromJSON` needs to be
+retro-compatible. Indeed, old events are still in the database and need to
+remain readable. (Not forever though with the help of
+xref:migrations.adoc[migrations].)
+
+== Stream family
+
+A stream family has 4 type parameters for the stream identifier, the event
+identifier, the event metadata and the event itself.
+
+We need types for the first three since we already created `BillingAccountEvent`
+in the previous step. `eventsourcing-postgresql`, the adaptor for PostgreSQL,
+uses the library `postgresql-simple`, so we need instances of
+`FromField/ToField` and `FromRow/ToRow`.
+
+[source,haskell]
+----
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+
+import Control.Monad.Trans
+import Data.Int (Int64)
+
+import qualified Control.Monad.Reader                 as Rdr
+import qualified Data.Aeson                           as Ae
+import qualified Data.Text                            as Tx
+import qualified Data.Time                            as T
+import qualified Data.Pool                            as Pool
+import qualified Database.Postgresql.Simple           as PG
+import qualified Database.Postgresql.Simple.FromField as PG.From
+import qualified Database.Postgresql.Simple.FromRow   as PG.From
+import qualified Database.Postgresql.Simple.ToField   as PG.To
+import qualified Database.Postgresql.Simple.ToRow     as PG.To
+
+import qualified Database.CQRS            as CQRS
+import qualified Database.CQRS.PostgreSQL as CQRS.PG
+
+newtype BillingAccountId
+  = BillingAccountId Tx.Text
+  deriving newtype
+    ( PG.From.FromField, PG.To.ToField
+    )
+
+newtype BillingAccountEventId
+  = BillingAccountEventId Int64
+  deriving newtype
+    ( PG.From.FromField, PG.To.ToField
+    )
+
+-- Typically, this type will be shared between stream families, hence the
+-- generic name.
+newtype EventMetadata = EventMetadata
+  { creationTime :: T.UTCTime
+  }
+
+instance PG.To.ToRow EventMetadata where
+  toRow metadata =
+    [ PG.To.toField (creationTime metadata)
+    ]
+
+instance PG.From.FromRow EventMetadata where
+  fromRow =
+    EventMetadata <$> PG.From.field
+
+-- The following instance makes it more convenient to write new events using
+-- `writeEvent` instead of `writeEventWithMetadata` and passing the metadata
+-- manually.
+instance MonadIO m => CQRS.MonadMetadata EventMetadata m where
+  getMetadata = do
+    creationTime <- liftIO T.getCurrentTime
+    pure $ EventMetadata creationTime
+----
+
+As previously stated, this tutorial doesn't make use of notification channels in
+PostgreSQL but, for the sake of completeness, here's a generic type that would
+be used to read such notifications.
+
+[source,haskell]
+----
+newtype NewEventNotification streamId eventId = NewEventNotification
+  { unNewEventNotification :: (streamId, eventId)
+  }
+
+instance
+    (Ae.FromJSON eventId, Ae.FromJSON streamId)
+    => Ae.FromJSON (NewEventNotification streamId eventId) where
+  parseJSON = Ae.withObject "NewEventNotification" $ \obj -> do
+    streamId <- obj .: "streamId"
+    eventId  <- obj .: "eventId"
+    pure $ NewEventNotification (streamId, eventId)
+----
+
+We can now create the stream family using `eventsourcing-postgresql`.
+
+[source,haskell]
+----
+type PGBillingAccountStreamFamily =
+  CQRS.PG.StreamFamily
+    BillingAccountId BillingAccountEventId EventMetadata BillingAccountEvent
+
+getBillingAccountStreamFamily
+  :: Rdr.ReaderT (Pool.Pool PG.Connection) m PGBillingAccountStreamFamily
+getBillingAccountStreamFamily = do
+  pool <- Rdr.ask
+  pure $ CQRS.PG.makeStreamFamily
+    (Pool.withResource pool)
+    "billing_account_events" -- Table.
+    "billing_account_new_events" -- Notification channel.
+    (fmap unNewEventNotification . Ae.eitherDecode . BSL.fromStrict)
+    -- ^ Function to decode notifications.
+    "billing_account_id" -- Stream identifier column.
+    "event_id" -- Event identifier column.
+    ["creation_time"] -- Event metadata columns.
+    "event" -- Event column.
+----
+
+== Writing new events
+
+Once you have a stream family, adding new events to one of its streams is fairly
+straightforward. One thing worth noting is that streams always exist, they don't
+have to be created. If there are no events with the corresponding stream
+identifier, the stream is simply considered empty.
+
+[source,haskell]
+----
+creditBillingAccount
+  :: MonadIO m
+  => BillingAccountId
+  -> Fixed E2
+  -> Rdr.ReaderT (Pool.Pool PG.Connection) m ()
+creditBillingAccount baId amount = do
+  family <- getBillingAccountStreamFamily
+  eRes <- Exc.runExceptT $ do
+    stream <- CQRS.getStream family baId
+    CQRS.writeEvent stream . MoneyCredited . MoneyCreditedEvent $ amount
+
+  -- Handle errors. (eRes :: Either CQRS.Error BillingAccountEventId)
+  pure ()
+----
+
+== Current balance
+
+The simplest way to use a stream of events is to run an aggregator on it. This
+is a simple function of type
+`EventWithContext eventId metadata event -> State aggregate ()`. `Aggregator` is
+a type alias for such a function.
+
+`runAggregator` calls the aggregator on all events in a stream in turn and
+returns the accumulated aggregate. To avoid traversing all events every time,
+you could use xref:aggregate-stores.adoc[Aggregate stores] or
+xref:projections.adoc[Projections].
+
+[source,haskell]
+----
+balanceAggregator
+  :: CQRS.Aggregator
+      (CQRS.EventWithContext
+        BillingAccountEventId EventMetadata BillingAccountEvent)
+      (Fixed E2)
+balanceAggregator ewc =
+  case CQRS.event ewc of
+    MoneyCredited (MoneyCreditedEvent amount) ->
+      St.modify' (+ amount)
+    MoneyDebited (MoneyDebitedEvent amount) ->
+      St.modify' (- amount)
+
+getCurrentBalance
+  :: BillingAccountId
+  -> Rdr.ReaderT (Pool.Pool PG.Connection) m (Fixed E2)
+getCurrentBalance baId = do
+  family <- getBillingAccountStreamFamily
+  eRes <- Exc.runExceptT $ do
+    stream <- CQRS.getStream family baId
+    (balance, _mLastEventId, _numberOfEventsProcessed) <-
+      CQRS.runAggregator
+        balanceAggregator
+        stream
+        mempty
+        -- ^ Bounds to select a subset of events. You probably won't need it.
+        -- This is used by the aggregate store to start where it left off last
+        -- time it was called. It could also be used to project the state of the
+        -- aggregate in the past by setting an upper limit to events.
+        0 -- The initial state.
+    pure balance
+
+  case eRes of
+    Left err ->
+      -- Handle errors. (err :: CQRS.Error)
+      error "meh!"
+    Right balance -> pure balance
+----

@@ -4,7 +4,7 @@ This is a library to do CQRS/ES in Haskell. The core library `eventsourcing`
 provides the abstractions and `eventsourcing-postgresql` is the adapater for
 PostgreSQL. Other adapters can be written and would be able to work together.
 
-== Key Concepts
+== Key concepts
 
 === Stream
 
@@ -12,7 +12,7 @@ The stream is the most important concept of the library. It represents a
 sequence of ordered events that belongs together. In DDD (Domain-Driven Design)
 terminology, it corresponds to a single aggregate instance.
 
-=== Stream Family
+=== Stream family
 
 Streams that share a common structure can be brought together into stream
 families index by some stream identifier. In DDD parlance, this would be used
@@ -43,7 +43,7 @@ For projections that populates SQL tables, the type would be as follows.
 [source,haskell]
 ----
 (streamId, EventWithContext eventId metadata event)
-  -> Identity [TabularDataAction] ()
+  -> State st [TabularDataAction] ()
 ----
 
 These functions can then be used by the library or an adapter to be run against
@@ -70,10 +70,48 @@ a monad in which you can push and merge events together to be sent downstream.
 inputEvent -> Transform eventId event ()
 ----
 
-== Modules Structure
+== More in-depth information
 
-TODO: Explain what each module contains.
+. xref:doc/tutorial.adoc[Guided tutorial] showcasing the core concepts.
+. Using xref:doc/aggregate-stores.adoc[aggregate stores] to cache aggregates
+instead of going through events every time.
+. xref:doc/in-memory-projection.adoc[Projecting in memory] from different
+streams into the same read model.
+. xref:doc/tests.adoc[Writing tests] that are efficient.
+. xref:doc/occ.adoc[Optimistic concurrency control] to write events without
+breaking consistency.
+. Using xref:doc/tabular-data.adoc[TabularDataAction] to write backend-agnostic
+projections.
+. xref:doc/migrations.adoc[Migrating] (and archiving) your events.
 
-== More In-Depth Information
+== Taxonomy
 
-. xref:doc/migrating.adoc[Migrating] (and archiving) your events.
+This list gives an overview of the concepts and terminology used in the library:
+
+[glossary]
+stream:: An (ordered) sequence of events belonging together forming a
+unit of consistency (aggregate instance in DDD.)
+stream family:: A family of streams indexed by some stream identifier (aggregate
+type in DDD.)
+transformer:: A function transforming a stream of events of type `a` into a
+stream of other events of type `b`.
+aggregator:: A function looping through events of a stream and accumulating an
+aggregate.
+aggregate store:: An in-memory cache containing the aggregate returned by an
+aggregator indexed by the stream identifier.
+projection:: A process going through events of a stream and doing something.
+More specifically, "effectful" projections can be used to project the stream of
+events into transactions that are sent to a database to create tables that can
+be queried later on.
+read model:: Something such as table in the database or an aggregate store that
+can be queried. Read models are ways to read data without having to go through
+all the events of a stream over and over again.
+migration:: A process going through all events of all streams in a stream family
+and migrating them -- possibly compacting or deleting some of them -- into a new
+stream family.
+task manager:: A process using an aggregator of tasks (with or without a start
+time) for all streams in a stream family and executing them when they are due.
+tracking table:: A table in a database used by a projection to keep track of
+what events have already been processed.
+adaptor:: An integration between `eventsourcing` (the core library) and a
+back-end such as PostgreSQL.
