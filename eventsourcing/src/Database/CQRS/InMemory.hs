@@ -1,3 +1,4 @@
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
@@ -22,6 +23,7 @@ import System.Mem.Weak     (Weak, deRefWeak, mkWeakPtr)
 
 import qualified Control.Concurrent.STM as STM
 import qualified Control.DeepSeq        as Seq
+import qualified Control.Monad.Except   as Exc
 import qualified Data.Hashable          as Hash
 import qualified Data.HashMap.Strict    as HM
 import qualified GHC.Conc
@@ -32,8 +34,8 @@ import qualified Database.CQRS as CQRS
 -- | In-memory event stream.
 --
 -- It's using STM internally so it's safe to have different thread writing
--- events to the stream concurrently. It's main purpose is for tests but it
--- could be used for production code as well.
+-- events to the stream concurrently. Its main purpose is for tests but it could
+-- be used for production code as well.
 data Stream metadata event = Stream
   { events :: InnerStream (event, metadata)
   , last   :: STM.TVar (STM.TMVar (InnerStream (event, metadata)))
@@ -67,27 +69,55 @@ instance MonadIO m => CQRS.Stream m (Stream metadata event) where
   streamEvents = streamStreamEvent
 
 instance
-    (MonadIO m, Seq.NFData event, Seq.NFData metadata)
+    ( Exc.MonadError CQRS.Error m
+    , MonadIO m
+    , Seq.NFData event
+    , Seq.NFData metadata
+    )
     => CQRS.WritableStream m (Stream metadata event) where
   writeEventWithMetadata = streamWriteEventWithMetadata
 
 streamWriteEventWithMetadata
-  :: (MonadIO m, Seq.NFData event, Seq.NFData metadata)
-  => Stream metadata event -> event -> metadata -> m Integer
-streamWriteEventWithMetadata Stream{..} event metadata =
-  liftIO $ do
+  :: ( CQRS.EventIdentifier (Stream metadata event) ~ Integer
+     , Exc.MonadError CQRS.Error m
+     , MonadIO m
+     , Seq.NFData event
+     , Seq.NFData metadata
+     )
+  => Stream metadata event
+  -> event
+  -> metadata
+  -> CQRS.ConsistencyCheck Integer
+  -> m Integer
+streamWriteEventWithMetadata Stream{..} event metadata cc =
+  (Exc.liftEither =<<) . liftIO $ do
     -- Force exceptions now and in this thread.
     evaluate $ Seq.rnf (event, metadata)
     STM.atomically $ do
-      lastVar <- STM.readTVar last
-      newVar  <- STM.newEmptyTMVar
-      let innerStream = Cons (event, metadata) (Future newVar)
-      STM.putTMVar lastVar innerStream
-      STM.writeTVar last newVar
-      identifier <- STM.stateTVar length $ \l ->
-        let l' = l + 1 in l' `seq` (l', l')
-      notify $ CQRS.EventWithContext identifier metadata event
-      pure identifier
+      mErr <- case cc of
+        CQRS.CheckNoEvents -> do
+          len <- STM.readTVar length
+          pure $ if len == 0 then Nothing else Just "stream not empty"
+        CQRS.CheckLastEvent identifier -> do
+          len <- STM.readTVar length
+          -- The identifier of the last event is the stream length.
+          pure $ if len == identifier
+            then Nothing
+            else Just "last event identifier doesn't match"
+        CQRS.NoConsistencyCheck -> pure Nothing
+
+      case mErr of
+        Just err -> pure . Left . CQRS.ConsistencyCheckError $ err
+        Nothing -> do
+          lastVar <- STM.readTVar last
+          newVar  <- STM.newEmptyTMVar
+          let innerStream = Cons (event, metadata) (Future newVar)
+          STM.putTMVar lastVar innerStream
+          STM.writeTVar last newVar
+          identifier <- STM.stateTVar length $ \l ->
+            let l' = l + 1 in l' `seq` (l', l')
+          notify $ CQRS.EventWithContext identifier metadata event
+          pure $ Right identifier
 
 streamStreamEvent
   :: MonadIO m

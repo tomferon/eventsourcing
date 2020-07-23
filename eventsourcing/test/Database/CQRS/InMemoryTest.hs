@@ -7,7 +7,7 @@ module Database.CQRS.InMemoryTest
 
 import Control.Concurrent (forkIO, killThread, threadDelay)
 import Control.Concurrent.MVar
-import Control.Monad (forever, replicateM_, zipWithM_)
+import Control.Monad (forever, replicateM_, void, zipWithM_)
 import Control.Monad.Trans (liftIO)
 import Data.Foldable (for_, traverse_)
 import Data.List (nub)
@@ -18,10 +18,11 @@ import System.Mem (performGC)
 import Test.Tasty
 import Test.Tasty.Hedgehog
 
-import qualified Hedgehog.Gen   as Gen
-import qualified Hedgehog.Range as Range
+import qualified Control.Monad.Except as Exc
+import qualified Hedgehog.Gen         as Gen
+import qualified Hedgehog.Range       as Range
 import qualified Pipes
-import qualified Pipes.Prelude  as Pipes
+import qualified Pipes.Prelude        as Pipes
 
 import Helpers (collect)
 
@@ -54,7 +55,7 @@ writtenExactlyOnce = do
   mvars <- liftIO $ for chunks $ \(streamId, events, mvar) -> do
     _ <- forkIO $ do
       stream <- CQRS.getStream streamFamily streamId
-      traverse_ (CQRS.writeEvent stream) events
+      _ <- Exc.runExceptT $ traverse_ (CQRS.writeEvent stream) events
       putMVar mvar ()
     pure mvar
 
@@ -84,7 +85,7 @@ writingSendsNotification = do
   _ <- liftIO . forkIO $
     for_ events $ \(streamId, event) -> do
       stream <- CQRS.getStream streamFamily (streamId :: Int)
-      CQRS.writeEvent stream (event :: Double)
+      void . Exc.runExceptT $ CQRS.writeEvent stream (event :: Double)
 
   notifications <- collect $
     Pipes.take (length events)
@@ -106,13 +107,13 @@ gcRemovesListener = do
   liftIO $ putMVar notifStreamMVar . Just =<< CQRS.allNewEvents streamFamily
 
   -- Fill the queue.
-  replicateM_ 100 $ CQRS.writeEvent stream ()
+  replicateM_ 100 . Exc.runExceptT $ CQRS.writeEvent stream ()
 
   do
     -- Trying to write a new event should fail.
     mvar <- liftIO newEmptyMVar
     threadId <- liftIO . forkIO $ do
-      _ <- CQRS.writeEvent stream () -- This should block.
+      void . Exc.runExceptT $ CQRS.writeEvent stream () -- This should block.
       putMVar mvar () -- This should not happen.
     liftIO $ threadDelay 1000
 
@@ -126,7 +127,7 @@ gcRemovesListener = do
   do
     mvar <- liftIO newEmptyMVar
     threadId <- liftIO . forkIO $ do
-      _ <- CQRS.writeEvent stream () -- This should not block.
+      void . Exc.runExceptT $ CQRS.writeEvent stream () -- This should not block.
       putMVar mvar () -- This should happen.
     liftIO $ threadDelay 1000
 

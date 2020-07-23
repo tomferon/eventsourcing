@@ -13,4 +13,5 @@ data Error
   | NewEventsStreamingError String
   | ProjectionError String
   | MigrationError String
+  | ConsistencyCheckError String
   deriving (Eq, Show, Generic)

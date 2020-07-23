@@ -1,1 +1,48 @@
-FIXME
+= Optimistic Concurrency Control
+
+CQRS separates the write side from the read side, the former being in charge of
+ensuring that the stream of events (i.e. the aggregate) is consistent. Recall
+that a stream of events is a unit of consistency. You should architecture your
+code so that things that change together are part of the same stream and only
+expect *eventual* consistency among different streams.
+
+One technique to ensure consistency is
+link:https://en.wikipedia.org/wiki/Optimistic_concurrency_control[Optimistic Concurrency Control]
+which `eventsourcing` implements in a very simple form of OCC with a function
+called `optimistically`.
+
+In a nutshell, what we want to do is:
+
+. Fetch the corresponding aggregate to a stream of events together with the
+identifier of the last event that was processed to produce this aggregate.
+. Try to write a new event checking that there hasn't been any new event since.
+. Retry if the condition failed.
+
+The corresponding code is fairly straightforward.
+
+[source,haskell]
+----
+import qualified Control.Monad.Except as Exc
+
+import qualified Database.CQRS as CQRS
+
+addNewThing :: Exc.MonadError CQRS.Error m => AggregateId -> Thing -> m ()
+addNewThing aggId thing = do
+    family <- getStreamFamilyOfThings
+    stream <- CQRS.getStream family aggId
+
+    CQRS.optimistically $ do
+      (agg, mLastEventId, _) <-
+        CQRS.runAggregator aggregator stream mempty initAggregate
+
+      CQRS.writeEventCc stream (SomeEvent thing) $
+        case mLastEventId of
+          Nothing -> CQRS.CheckNoEvents
+          Just eventId -> CQRS.CheckLastEvent eventId
+
+  where
+    aggregator
+      :: CQRS.Aggregator (CQRS.EventWithContext' ThingStream) SomeAggregate
+    aggregator =
+      -- ...
+----

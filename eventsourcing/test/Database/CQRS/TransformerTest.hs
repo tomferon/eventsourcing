@@ -21,13 +21,15 @@ import Hedgehog hiding (collect)
 import Test.Tasty
 import Test.Tasty.Hedgehog
 
-import qualified Hedgehog.Gen   as Gen
-import qualified Hedgehog.Range as Range
+import qualified Control.Monad.Except as Exc
+import qualified Hedgehog.Gen         as Gen
+import qualified Hedgehog.Range       as Range
 
 import Helpers (collect)
 
 import qualified Database.CQRS          as CQRS
 import qualified Database.CQRS.InMemory as CQRS.InMem
+
 tests :: TestTree
 tests = testGroup "Transformer"
   [ testProperty "Events are dropped and merged accordingly" $
@@ -128,7 +130,7 @@ eventsDroppedAndMerged = do
 
   liftIO . forM_ inputEvents $ \(streamId, event) -> do
     stream <- CQRS.getStream inputStreamFamily streamId
-    void $ CQRS.writeEvent stream event
+    void . Exc.runExceptT $ CQRS.writeEvent stream event
 
   stream1 <- liftIO $ CQRS.getStream transformedStreamFamily 1
   stream2 <- liftIO $ CQRS.getStream transformedStreamFamily 2

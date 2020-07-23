@@ -9,7 +9,10 @@ module Database.CQRS
   , EventWithContext(..)
   , EventWithContext'
   , MonadMetadata(..)
+  , ConsistencyCheck(..)
   , writeEvent
+  , writeEventCc
+  , optimistically
   , StreamBounds(..)
   , StreamBounds'
   , afterEvent

@@ -32,8 +32,10 @@ import qualified Database.PostgreSQL.Simple.FromField    as PG.From
 import qualified Database.PostgreSQL.Simple.FromRow      as PG.From
 import qualified Database.PostgreSQL.Simple.Notification as PG
 import qualified Database.PostgreSQL.Simple.ToField      as PG.To
+import qualified Database.PostgreSQL.Simple.ToRow        as PG.To
 import qualified Pipes
 
+import Database.CQRS.PostgreSQL.Internal (SomeParams(..))
 import Database.CQRS.PostgreSQL.Stream
 
 import qualified Database.CQRS as CQRS
@@ -98,6 +100,7 @@ streamFamilyGetStream
   :: forall streamId eventId metadata event m.
      ( MonadIO m
      , PG.To.ToField streamId
+     , PG.To.ToField eventId
      )
   => StreamFamily streamId eventId metadata event
   -> streamId
@@ -119,18 +122,38 @@ streamFamilyGetStream StreamFamily{..} streamId =
       <> " = ? ORDER BY "
       <> eventIdentifierColumn <> " ASC"
 
-    insertQuery :: (PG.Query, PG.Only streamId)
-    insertQuery = (insertQueryTpl, PG.Only streamId)
-
-    insertQueryTpl :: PG.Query
-    insertQueryTpl =
-      "INSERT INTO "
-      <> relation <> "("
-      <> streamIdentifierColumn <> ", "
-      <> metadataList <> ", "
-      <> eventColumn <> ") VALUES (?, "
-      <> metadataMarks <> ", ?) RETURNING "
-      <> eventIdentifierColumn
+    insertQuery
+      :: (PG.To.ToField encEvent, PG.To.ToRow metadata)
+      => encEvent
+      -> metadata
+      -> CQRS.ConsistencyCheck eventId
+      -> (PG.Query, SomeParams)
+    insertQuery encEvent metadata cc =
+      let baseParams =
+            PG.Only streamId :. metadata :. PG.Only encEvent
+          (cond, params) = case cc of
+            CQRS.NoConsistencyCheck -> ("", SomeParams baseParams)
+            CQRS.CheckNoEvents ->
+              ( " WHERE NOT EXISTS (SELECT 1 FROM " <> relation <> " WHERE "
+                  <> streamIdentifierColumn <> " = ?)"
+              , SomeParams (baseParams :. PG.Only streamId)
+              )
+            CQRS.CheckLastEvent eventId ->
+              ( " WHERE NOT EXISTS (SELECT 1 FROM " <> relation <> " WHERE "
+                <> streamIdentifierColumn <> " = ? AND "
+                <> eventIdentifierColumn <> " > ?)"
+              , SomeParams (baseParams :. (streamId, eventId))
+              )
+          query =
+            "INSERT INTO "
+            <> relation <> "("
+            <> streamIdentifierColumn <> ", "
+            <> metadataList <> ", "
+            <> eventColumn <> ")  SELECT ?, "
+            <> metadataMarks <> ", ?" <> cond <> " RETURNING "
+            <> eventIdentifierColumn
+      in
+      (query, params)
 
     metadataList :: PG.Query
     metadataList =

@@ -1,3 +1,4 @@
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DeriveTraversable #-}
 {-# LANGUAGE FlexibleContexts #-}
@@ -15,7 +16,10 @@ module Database.CQRS.Stream
   , EventWithContext(..)
   , EventWithContext'
   , MonadMetadata(..)
+  , ConsistencyCheck(..)
   , writeEvent
+  , writeEventCc
+  , optimistically
   , StreamBounds(..)
   , StreamBounds'
   , afterEvent
@@ -24,7 +28,10 @@ module Database.CQRS.Stream
 
 import GHC.Generics
 
+import qualified Control.Monad.Except as Exc
 import qualified Pipes
+
+import Database.CQRS.Error
 
 class Stream f stream where
   -- | Type of the events contained in that stream.
@@ -54,14 +61,28 @@ class Stream f stream where
             (EventWithContext' stream)
         ] f ()
 
+-- | A condition to check before inserting a new event in a stream.
+--
+-- This can be used to enforce consistency by checking that no new events were
+-- inserted since some validation has been performed and therefore that the
+-- validations are still sound.
+data ConsistencyCheck identifier
+  = NoConsistencyCheck -- ^ Always write the new event.
+  | CheckNoEvents -- ^ There are no events in that stream.
+  | CheckLastEvent identifier
+    -- ^ The latest event's identifier matches.
+
 class Stream f stream => WritableStream f stream where
   -- | Append the event to the stream and return the identifier.
   --
   -- The identifier must be greater than the previous events' identifiers.
+  --
+  -- The function must throw 'ConsistencyCheckError' if the check fails.
   writeEventWithMetadata
     :: stream
     -> EventType stream
     -> EventMetadata stream
+    -> ConsistencyCheck (EventIdentifier stream)
     -> f (EventIdentifier stream)
 
 -- | Once added to the stream, an event is adorned with an identifier and some
@@ -94,7 +115,34 @@ writeEvent
   -> m (EventIdentifier stream)
 writeEvent stream ev = do
   md <- getMetadata
-  writeEventWithMetadata stream ev md
+  writeEventWithMetadata stream ev md NoConsistencyCheck
+
+-- | Get the metadata from the environment, validate the consistency check,
+-- append the event to the store and return its identifier.
+writeEventCc
+  :: (Monad m, MonadMetadata (EventMetadata stream) m, WritableStream m stream)
+  => stream
+  -> EventType stream
+  -> ConsistencyCheck (EventIdentifier stream)
+  -> m (EventIdentifier stream)
+writeEventCc stream ev cc = do
+  md <- getMetadata
+  writeEventWithMetadata stream ev md cc
+
+-- | Execute an action and retry indefinitely as long as it throws
+-- 'ConsistencyCheckError'.
+--
+-- This makes it possible to have Optimistic Concurrency Control when writing
+-- events by getting the aggregate and using 'writeEventCc' or
+-- 'writeEventWithMetadata' inside the action passed to 'optimistically'.
+--
+-- /!\ It does NOT create a transaction when you can write several events. You
+-- should only use this to write a single event!
+optimistically :: Exc.MonadError Error m => m a -> m a
+optimistically f = do
+  f `Exc.catchError` \case
+    ConsistencyCheckError _ -> optimistically f
+    e -> Exc.throwError e
 
 -- | Lower/upper bounds of an event stream.
 --

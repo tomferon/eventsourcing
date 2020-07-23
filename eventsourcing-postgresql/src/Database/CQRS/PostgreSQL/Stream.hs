@@ -36,6 +36,8 @@ import qualified Database.PostgreSQL.Simple.ToField   as PG.To
 import qualified Database.PostgreSQL.Simple.ToRow     as PG.To
 import qualified Pipes
 
+import Database.CQRS.PostgreSQL.Internal (SomeParams(..))
+
 import qualified Database.CQRS as CQRS
 
 -- | Stream of events stored in a PostgreSQL relation.
@@ -45,16 +47,29 @@ import qualified Database.CQRS as CQRS
 -- insert into that view.
 data Stream identifier metadata event =
   forall r r'. (PG.To.ToRow r, PG.To.ToRow r') => Stream
-    { connectionPool   :: forall a. (PG.Connection -> IO a) -> IO a
-    , selectQuery      :: (PG.Query, r)
+    { connectionPool :: forall a. (PG.Connection -> IO a) -> IO a
+    , selectQuery    :: (PG.Query, r)
       -- ^ Select all events in correct order.
-    , insertQuery      :: (PG.Query, r')
+    , insertQuery
+        :: forall encEvent.
+           (PG.To.ToField encEvent, PG.To.ToRow metadata)
+        => encEvent -> metadata -> CQRS.ConsistencyCheck identifier
+        -> (PG.Query, r')
+      -- ^ Build a query to insert a new event. The constraints are there to
+      -- postpone them to calls to 'writeEventWithMetadata'. If the user never
+      -- writes new events, these constraints won't be required by the compiler.
     , identifierColumn :: PG.Query
     }
 
 -- | Make a 'Stream' from basic information about the relation name and columns.
 makeStream
-  :: (forall a. (PG.Connection -> IO a) -> IO a)
+  :: forall identifier metadata event.
+     ( CQRS.WritableEvent event
+     , PG.To.ToField (CQRS.EncodingFormat event)
+     , PG.To.ToField identifier
+     , PG.To.ToRow metadata
+     )
+  => (forall a. (PG.Connection -> IO a) -> IO a)
      -- ^ Connection pool as a function.
   -> PG.Query   -- ^ Relation name.
   -> PG.Query   -- ^ Identifier column name. If there are several, use a tuple.
@@ -64,7 +79,6 @@ makeStream
 makeStream connectionPool relation
            identifierColumn metadataColumns eventColumn =
     let selectQuery = (selectQuery', ())
-        insertQuery = (insertQuery', ())
     in Stream{..}
 
   where
@@ -77,14 +91,31 @@ makeStream connectionPool relation
       <> " FROM "  <> relation
       <> " ORDER BY " <> identifierColumn <> " ASC"
 
-    insertQuery' :: PG.Query
-    insertQuery' =
-      "INSERT INTO " <> relation <> "("
-      <> identifierColumn <> ", " <> metadataList <> ", " <> eventColumn
-      <> ") VALUES (?, "
-      <> metadataMarks
-      <> ", ?) RETURNING "
-      <> identifierColumn
+    insertQuery
+      :: (PG.To.ToField encEvent, PG.To.ToRow metadata)
+      => encEvent -> metadata -> CQRS.ConsistencyCheck identifier
+      -> (PG.Query, SomeParams)
+    insertQuery encEvent metadata cc =
+      let baseParams = metadata :. PG.Only encEvent
+          (cond, params) = case cc of
+            CQRS.NoConsistencyCheck -> ("", SomeParams baseParams)
+            CQRS.CheckNoEvents ->
+              ( " WHERE NOT EXISTS (SELECT 1 FROM " <> relation <> ")"
+              , SomeParams baseParams
+              )
+            CQRS.CheckLastEvent identifier ->
+              ( " WHERE NOT EXISTS (SELECT 1 FROM " <> relation <> " WHERE "
+                <> identifierColumn <> " > ?)"
+              , SomeParams (baseParams :. PG.Only identifier)
+              )
+          query =
+            "INSERT INTO " <> relation <> "("
+            <> metadataList <> ", " <> eventColumn
+            <> ") SELECT " <> metadataMarks <> ", ?"
+            <> cond
+            <> " RETURNING " <> identifierColumn
+      in
+      (query, params)
 
     metadataList :: PG.Query
     metadataList =
@@ -104,7 +135,10 @@ makeStream'
   => (forall a. (PG.Connection -> IO a) -> IO a)
      -- ^ Connection pool as a function.
   -> (PG.Query, r) -- ^ Select query.
-  -> (PG.Query, r') -- ^ Insert query template (with question marks.)
+  -> (forall encEvent. (PG.To.ToField encEvent, PG.To.ToRow metadata)
+      => encEvent -> metadata -> CQRS.ConsistencyCheck identifier
+      -> (PG.Query, r'))
+     -- ^ Insert query builder.
   -> PG.Query -- ^ Identifier column (use tuple if several.)
   -> Stream identifier metadata event
 makeStream' connectionPool selectQuery insertQuery identifierColumn =
@@ -154,11 +188,12 @@ streamWriteEventWithMetadata
   => Stream identifier metadata event
   -> event
   -> metadata
+  -> CQRS.ConsistencyCheck identifier
   -> m identifier
-streamWriteEventWithMetadata Stream{..} event metadata = do
+streamWriteEventWithMetadata Stream{..} event metadata cc = do
   eIds <- liftIO . connectionPool $ \conn -> do
-    let params = metadata :. PG.Only (CQRS.encodeEvent event)
-    (Right <$> PG.query conn (fst insertQuery) (snd insertQuery :. params))
+    let (req, params) = insertQuery (CQRS.encodeEvent event) metadata cc
+    (Right <$> PG.query conn req params)
       `catches`
         [ handleError (Proxy @PG.FormatError) CQRS.EventWriteError
         , handleError (Proxy @PG.QueryError)  CQRS.EventWriteError
@@ -169,6 +204,7 @@ streamWriteEventWithMetadata Stream{..} event metadata = do
   case eIds of
     Left err -> Exc.throwError err
     Right [PG.Only identifier] -> pure identifier
+    Right [] -> Exc.throwError $ CQRS.ConsistencyCheckError "no events inserted"
     Right ids -> Exc.throwError $ CQRS.EventWriteError $
       show (length ids) ++ " events were inserted"
 

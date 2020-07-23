@@ -1,3 +1,4 @@
+{-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -185,3 +186,8 @@ doUpsertTrackingTable
         [ handleError (Proxy @PG.FormatError) CQRS.ProjectionError
         , handleError (Proxy @PG.SqlError)    CQRS.ProjectionError
         ]
+
+data SomeParams =  forall r. PG.To.ToRow r => SomeParams r
+
+instance PG.To.ToRow SomeParams where
+  toRow (SomeParams x) = PG.To.toRow x
