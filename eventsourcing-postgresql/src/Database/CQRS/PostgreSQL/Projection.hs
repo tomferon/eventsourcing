@@ -1,3 +1,8 @@
+{-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -20,7 +25,7 @@ import Control.Monad              ((<=<), forever, forM_, unless, void)
 import Control.Monad.Trans        (MonadIO(..), lift)
 import Data.Hashable              (Hashable)
 import Data.List                  (intersperse)
-import Data.Monoid                (getLast)
+import Data.Monoid                (Last(..))
 import Data.Proxy                 (Proxy(..))
 import Data.String                (fromString)
 import Data.Tuple                 (swap)
@@ -31,7 +36,6 @@ import qualified Control.Monad.Except                 as Exc
 import qualified Control.Monad.Identity               as Id
 import qualified Control.Monad.State.Strict           as St
 import qualified Data.Bifunctor                       as Bifunctor
-import qualified Data.Functor.Compose                 as Comp
 import qualified Data.HashMap.Strict                  as HM
 import qualified Database.PostgreSQL.Simple           as PG
 import qualified Database.PostgreSQL.Simple.FromField as PG.From
@@ -362,93 +366,197 @@ getLastEventId
 getLastEventId connectionPool trackingTable streamFamily streamId =
   Exc.liftEither <=< liftIO $
     (Right
-     <$> getTrackedState connectionPool trackingTable streamFamily streamId)
+      <$> getTrackedState connectionPool trackingTable streamFamily streamId)
     `catches`
       [ handleError (Proxy @PG.FormatError) CQRS.ProjectionError
       , handleError (Proxy @PG.SqlError)    CQRS.ProjectionError
       ]
 
 fromTabularDataActions
-  :: forall cols. CQRS.Tab.AllColumns PG.To.ToField cols
+  :: FromTabularDataAction cols
   => PG.Query -- ^ Relation name.
   -> [CQRS.Tab.TabularDataAction cols]
   -> [SqlAction]
-fromTabularDataActions relation =
-    map fromTabularDataAction . CQRS.Tab.optimiseActions
+fromTabularDataActions = map . fromTabularDataAction
 
-  where
-    fromTabularDataAction :: CQRS.Tab.TabularDataAction cols -> SqlAction
-    fromTabularDataAction  = \case
-      CQRS.Tab.Insert tuple ->
-        let (identifiers, values) =
-              unzip
-              . CQRS.Tab.toList @PG.To.ToField
-                  (\name (Id.Identity x) ->
-                    (fromString @PG.Identifier name, PG.To.toField x))
-              $ tuple
-            questionMarks =
-              "(" <> mconcat (intersperse "," (map (const "?") values)) <> ")"
-            query =
-              "INSERT INTO " <> relation <> questionMarks
-              <> " VALUES " <> questionMarks
-        in
-        makeSqlAction query (identifiers :. values)
+class FromTabularDataAction cols where
+  fromTabularDataAction
+    :: PG.Query -> CQRS.Tab.TabularDataAction cols -> SqlAction
 
-      CQRS.Tab.Update updates conds ->
-        let (updatesQuery, updatesValues) =
-              Bifunctor.bimap (mconcat . intersperse ",") mconcat
-              . unzip
-              . CQRS.Tab.toList @PG.To.ToField
-                  (\name value -> case getLast value of
-                    Nothing -> ("", [])
-                    Just x  ->
-                      ( "? = ?"
-                      , [ PG.To.toField (fromString @PG.Identifier name)
-                        , PG.To.toField x
-                        ]
-                      ))
-              $ updates
+instance
+    forall keyCols cols.
+    ( CQRS.Tab.AllColumns
+        PG.To.ToField (CQRS.Tab.Flatten ('CQRS.Tab.WithUniqueKey keyCols cols))
+    , CQRS.Tab.AllColumns PG.To.ToField keyCols
+    , CQRS.Tab.AllColumns PG.To.ToField cols
+    , CQRS.Tab.MergeSplitTuple keyCols cols
+    )
+    => FromTabularDataAction ('CQRS.Tab.WithUniqueKey keyCols cols) where
 
-            (whereStmtQuery, whereStmtValues) =
-              makeWhereStatement conds
+  fromTabularDataAction relation = \case
+    CQRS.Tab.Insert tuple ->
+      makeInsertSqlAction @('CQRS.Tab.WithUniqueKey keyCols cols) relation tuple
+    CQRS.Tab.Update updates conds ->
+      makeUpdateSqlAction
+        @('CQRS.Tab.WithUniqueKey keyCols cols)
+        relation updates conds
+    CQRS.Tab.Upsert tuple -> makeUpsertSqlAction @keyCols @cols relation tuple
+    CQRS.Tab.Delete conds ->
+      makeDeleteSqlAction
+        @('CQRS.Tab.WithUniqueKey keyCols cols)
+        relation conds
 
-            values = updatesValues ++ whereStmtValues
-            query =
-              "UPDATE " <> relation <> " SET " <> updatesQuery <> whereStmtQuery
-        in
-        (query, values)
+instance
+    forall cols.
+    CQRS.Tab.AllColumns PG.To.ToField cols
+    => FromTabularDataAction ('CQRS.Tab.Flat cols) where
 
-      CQRS.Tab.Delete conds ->
-        let (whereStmtQuery, whereStmtValues) =
-              makeWhereStatement conds
-            query = "DELETE FROM " <> relation <> whereStmtQuery
-        in
-        (query, whereStmtValues)
+  fromTabularDataAction relation = \case
+    CQRS.Tab.Insert tuple ->
+      makeInsertSqlAction @('CQRS.Tab.Flat cols) relation tuple
+    CQRS.Tab.Update updates conds ->
+      makeUpdateSqlAction @('CQRS.Tab.Flat cols) relation updates conds
+    CQRS.Tab.Delete conds ->
+      makeDeleteSqlAction @('CQRS.Tab.Flat cols) relation conds
 
-    makeWhereStatement
-      :: CQRS.Tab.Tuple (Comp.Compose [] CQRS.Tab.Condition) cols
-      -> (PG.Query, [PG.To.Action])
-    makeWhereStatement =
-      Bifunctor.bimap
-        (\cs -> if null cs
-          then ""
-          else mconcat (" WHERE " : intersperse " AND " cs))
-        mconcat
-      . unzip
-      . mconcat
-      . CQRS.Tab.toList @PG.To.ToField
-          (\name value ->
-              map (makeCond (PG.To.toField
-                            (fromString @PG.Identifier name)))
-                  (Comp.getCompose value))
+makeInsertSqlAction
+  :: forall (cols :: CQRS.Tab.Columns).
+     CQRS.Tab.AllColumns PG.To.ToField (CQRS.Tab.Flatten cols)
+  => PG.Query -> CQRS.Tab.Tuple Id.Identity cols -> SqlAction
+makeInsertSqlAction relation tuple =
+  let (identifiers, values) =
+        unzip
+        . CQRS.Tab.toList @PG.To.ToField
+            (\name (Id.Identity x) ->
+              (fromString @PG.Identifier name, PG.To.toField x))
+        $ tuple
+      questionMarks =
+        "(" <> mconcat (intersperse "," (map (const "?") values)) <> ")"
+      query =
+        "INSERT INTO " <> relation <> questionMarks
+        <> " VALUES " <> questionMarks
+  in
+  makeSqlAction query (identifiers :. values)
 
-    makeCond
-      :: PG.To.ToField a
-      => PG.To.Action -> CQRS.Tab.Condition a -> (PG.Query, [PG.To.Action])
-    makeCond name = \case
-      CQRS.Tab.Equal x -> ("? = ?", [name, PG.To.toField x])
-      CQRS.Tab.NotEqual x -> ("? <> ?", [name, PG.To.toField x])
-      CQRS.Tab.LowerThan x -> ("? < ?", [name, PG.To.toField x])
-      CQRS.Tab.LowerThanOrEqual x -> ("? <= ?", [name, PG.To.toField x])
-      CQRS.Tab.GreaterThan x -> ("? > ?", [name, PG.To.toField x])
-      CQRS.Tab.GreaterThanOrEqual x -> ("? >= ?", [name, PG.To.toField x])
+makeUpdateSqlAction
+  :: forall (cols ::  CQRS.Tab.Columns).
+     CQRS.Tab.AllColumns PG.To.ToField (CQRS.Tab.Flatten cols)
+  => PG.Query
+  -> CQRS.Tab.Tuple Last cols
+  -> CQRS.Tab.Tuple CQRS.Tab.Conditions cols
+  -> SqlAction
+makeUpdateSqlAction relation updates conds =
+  let (updatesQuery, updatesValues) =
+        Bifunctor.bimap (mconcat . intersperse ",") mconcat
+        . unzip
+        . CQRS.Tab.toList @PG.To.ToField
+            (\name value -> case getLast value of
+              Nothing -> ("", [])
+              Just x  ->
+                ( "? = ?"
+                , [ PG.To.toField (fromString @PG.Identifier name)
+                  , PG.To.toField x
+                  ]
+                ))
+        $ updates
+
+      (whereStmtQuery, whereStmtValues) = makeWhereStatement @cols conds
+
+      values = updatesValues ++ whereStmtValues
+      query =
+        "UPDATE " <> relation <> " SET " <> updatesQuery <> whereStmtQuery
+  in
+  (query, values)
+
+makeUpsertSqlAction
+  :: forall keyCols cols.
+     ( CQRS.Tab.AllColumns PG.To.ToField keyCols
+     , CQRS.Tab.AllColumns PG.To.ToField cols
+     , CQRS.Tab.MergeSplitTuple keyCols cols
+     )
+  => PG.Query
+  -> CQRS.Tab.Tuple Id.Identity ('CQRS.Tab.WithUniqueKey keyCols cols)
+  -> SqlAction
+makeUpsertSqlAction relation tuple =
+  let toSqlValues
+        :: forall flatCols. CQRS.Tab.AllColumns PG.To.ToField flatCols
+        => CQRS.Tab.FlatTuple Id.Identity flatCols
+        -> [(PG.Identifier, PG.To.Action)]
+      toSqlValues =
+        CQRS.Tab.toList @PG.To.ToField
+          (\name (Id.Identity x) ->
+            (fromString @PG.Identifier name, PG.To.toField x))
+      (keyTuple, otherTuple) = CQRS.Tab.splitTuple @keyCols @cols tuple
+      keyPairs = toSqlValues keyTuple
+      (keyIdentifiers, keyValues) = unzip keyPairs
+      otherPairs = toSqlValues otherTuple
+      (otherIdentifiers, otherValues) = unzip otherPairs
+
+      mkQuestionMarks xs =
+        mconcat (intersperse "," (map (const "?") xs))
+      keyQuestionMarks = mkQuestionMarks keyValues
+      rowQuestionMarks =
+        "(" <> mkQuestionMarks (keyValues ++ otherValues) <> ")"
+
+      mkValues =
+        foldr (\(name, value) acc -> PG.To.toField name : value : acc) []
+      updateSetValues = mkValues otherPairs
+      updateWhereValues = mkValues keyPairs
+
+      query =
+        "INSERT INTO " <> relation <> rowQuestionMarks
+        <> " VALUES " <> rowQuestionMarks
+        <> " ON CONFLICT " <> keyQuestionMarks <> " DO UPDATE SET "
+        <> mconcat
+            (intersperse ", " (map (const "? = ?") otherIdentifiers))
+        <> " WHERE "
+        <> mconcat
+            (intersperse " AND " (map (const "? = ?") keyIdentifiers))
+
+  in
+  makeSqlAction query $
+    keyIdentifiers :. otherIdentifiers :. keyValues :. otherValues
+    :. keyIdentifiers :. updateSetValues :. updateWhereValues
+
+makeDeleteSqlAction
+  :: forall (cols :: CQRS.Tab.Columns).
+     CQRS.Tab.AllColumns PG.To.ToField (CQRS.Tab.Flatten cols)
+  => PG.Query
+  -> CQRS.Tab.Tuple CQRS.Tab.Conditions cols
+  -> SqlAction
+makeDeleteSqlAction relation conds =
+  let (whereStmtQuery, whereStmtValues) =
+        makeWhereStatement @cols conds
+      query = "DELETE FROM " <> relation <> whereStmtQuery
+  in
+  (query, whereStmtValues)
+
+makeWhereStatement
+  :: forall (cols :: CQRS.Tab.Columns).
+     CQRS.Tab.AllColumns PG.To.ToField (CQRS.Tab.Flatten cols)
+  => CQRS.Tab.Tuple CQRS.Tab.Conditions cols
+  -> (PG.Query, [PG.To.Action])
+makeWhereStatement =
+  Bifunctor.bimap
+    (\cs -> if null cs
+      then ""
+      else mconcat (" WHERE " : intersperse " AND " cs))
+    mconcat
+  . unzip
+  . mconcat
+  . CQRS.Tab.toList @PG.To.ToField @(CQRS.Tab.Flatten cols)
+      (\name value ->
+        map
+          (makeCond (PG.To.toField (fromString @PG.Identifier name)))
+          (CQRS.Tab.getConditions value))
+
+makeCond
+  :: PG.To.ToField a
+  => PG.To.Action -> CQRS.Tab.Condition a -> (PG.Query, [PG.To.Action])
+makeCond name = \case
+  CQRS.Tab.Equal x -> ("? = ?", [name, PG.To.toField x])
+  CQRS.Tab.NotEqual x -> ("? <> ?", [name, PG.To.toField x])
+  CQRS.Tab.LowerThan x -> ("? < ?", [name, PG.To.toField x])
+  CQRS.Tab.LowerThanOrEqual x -> ("? <= ?", [name, PG.To.toField x])
+  CQRS.Tab.GreaterThan x -> ("? > ?", [name, PG.To.toField x])
+  CQRS.Tab.GreaterThanOrEqual x -> ("? >= ?", [name, PG.To.toField x])

@@ -24,6 +24,8 @@ library
     Database.CQRS.Stream
     Database.CQRS.StreamFamily
     Database.CQRS.TabularData
+    Database.CQRS.TabularData.Internal
+    Database.CQRS.TabularData.Optimisation
     Database.CQRS.TaskManager
     Database.CQRS.Transformer
 

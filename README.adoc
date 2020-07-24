@@ -1,8 +1,8 @@
 = eventsourcing
 
 This is a library to do CQRS/ES in Haskell. The core library `eventsourcing`
-provides the abstractions and `eventsourcing-postgresql` is the adapater for
-PostgreSQL. Other adapters can be written and would be able to work together.
+provides the abstractions and `eventsourcing-postgresql` is the adaptor for
+PostgreSQL. Other adaptors can be written and would be able to work together.
 
 == Key concepts
 

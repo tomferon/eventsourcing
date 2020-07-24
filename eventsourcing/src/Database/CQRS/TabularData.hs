@@ -1,39 +1,58 @@
+{-# LANGUAGE QuantifiedConstraints #-}
+{-# LANGUAGE TypeFamilyDependencies #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
 
 -- | This module provides a backend-agnostic abstraction on top on tabular data
--- allowing projections to decouple projections from their storage.
+-- allowing projections to be decoupled from their storage.
 --
--- A 'Table' is a list of 'Tuple's. 'TabularDataAction's can be performed on a
--- table (it can be a 'Table' but also a SQL relation.)
+-- A 'Table' is a list (if using 'Flat') or a hash map
+-- (if using 'WithUniqueKeys') of 'Tuple's.
+
+-- 'TabularDataAction's can be performed on a 'Table' in memory or a table in a
+-- database with the help of an adaptor translating them in commands.
+-- For example, `eventsourcing-postgresql` has a function
+-- `fromTabularDataActions`.
 --
 -- @
--- type User f =
---   Tuple f ['("user_id", Int), '("email", String), '("admin", Bool)]
+-- type UserCols =
+--   'WithUniqueKey
+--     '[ '("user_id", Int)]
+--        -- Key columns. (The backtick and the space are important for it to be
+--        -- parsed correctly since the list only has one element.)
+--     ['("email", String), '("admin", Bool)] -- Other columns.
+--
+-- type User f = Tuple f UserCols
 --
 -- completeUser :: User Identity
 -- completeUser = 3 ~: "admin@example.com" ~: True ~: empty
 --
 -- incompleteUser :: User Last
--- incompleteUser = field @"admin" True <> field @"email" "admin@example.com"
+-- incompleteUser =
+--   field @UserCols @"admin" True
+--   <> field @UserCols @"email" "admin@example.com"
 --
--- userConditions :: User Condition
+-- userConditions :: User Conditions
 -- userConditions =
---   field @"admin" (Equal True) <> field @"user_id" (LowerThan 100)
+--   ffield @UserCols @"admin" (equal True)
+--   <> ffield @UserCols @"user_id" (lowerThan 100)
 --
 -- userStrings :: [(String, String)]
 -- userStrings = toList @Show (maybe "NULL" show . getLast) incompleteUser
@@ -42,220 +61,196 @@
 
 module Database.CQRS.TabularData
   ( TabularDataAction(..)
-  , applyTabularDataAction
-  , optimiseActions
   , Condition(..)
-  , Tuple(..)
+  , Conditions(..)
+  , equal
+  , notEqual
+  , lowerThan
+  , lowerThanOrEqual
+  , greaterThan
+  , greaterThanOrEqual
+  , Columns(..)
+  , Tuple
+  , Flatten
+  , FlatTuple(..)
   , (~:)
   , empty
   , Table
   , field
   , ffield
+  , MergeSplitTuple(..)
+  , runProjectionWith
+  , applyTabularDataAction
+  , GetKeyAndConditions
   , AllColumns
   , toList
   ) where
 
-import Control.Monad (guard)
-import Data.Kind (Constraint, Type)
+import Control.Monad (foldM)
+import Data.Hashable (Hashable(..))
+import Data.Kind (Type)
+import Data.List (foldl')
 import Data.Monoid (Last(..))
-import Data.Proxy (Proxy(..))
-import GHC.TypeLits (KnownSymbol, Symbol, symbolVal)
+import Pipes ((>->))
 
-import qualified Control.Monad.Identity as Id
-import qualified Data.Functor.Compose as Comp
+import qualified Control.Concurrent.STM     as STM
+import qualified Control.Monad.Except       as Exc
+import qualified Control.Monad.Identity     as Id
+import qualified Control.Monad.State.Strict as St
+import qualified Data.HashMap.Strict        as HM
+import qualified Pipes
 
-data Condition a where
-  Equal              :: Eq a => a -> Condition a
-  NotEqual           :: Eq a =>  a -> Condition a
-  LowerThan          :: Ord a => a -> Condition a
-  LowerThanOrEqual   :: Ord a => a -> Condition a
-  GreaterThan        :: Ord a => a -> Condition a
-  GreaterThanOrEqual :: Ord a => a -> Condition a
+import Database.CQRS.TabularData.Internal
+
+import qualified Database.CQRS as CQRS
+
+equal :: Eq a => a -> Conditions a
+equal = Conditions . pure . Equal
+
+notEqual :: Eq a => a -> Conditions a
+notEqual = Conditions . pure . NotEqual
+
+lowerThan :: Ord a => a -> Conditions a
+lowerThan = Conditions . pure . LowerThan
+
+lowerThanOrEqual :: Ord a => a -> Conditions a
+lowerThanOrEqual = Conditions . pure . LowerThanOrEqual
+
+greaterThan :: Ord a => a -> Conditions a
+greaterThan = Conditions . pure . GreaterThan
+
+greaterThanOrEqual :: Ord a => a -> Conditions a
+greaterThanOrEqual = Conditions . pure . GreaterThanOrEqual
 
 -- | Action on tabular data with an index.
 --
 -- Its purpose is to be used by an 'EffectfulProjection' to create persisting
 -- backend-agnostic projections.
-data TabularDataAction cols
-  = Insert (Tuple Id.Identity cols)
-  | Update (Tuple Last cols) (Tuple (Comp.Compose [] Condition) cols)
-  | Delete (Tuple (Comp.Compose [] Condition) cols)
+data TabularDataAction (cols :: Columns) where
+  Insert :: Tuple Id.Identity cols -> TabularDataAction cols
+  Update :: Tuple Last cols -> Tuple Conditions cols -> TabularDataAction cols
+  Upsert
+    :: Tuple Id.Identity ('WithUniqueKey keyCols cols)
+    -> TabularDataAction ('WithUniqueKey keyCols cols)
+    -- ^ Insert a new row or update the row with the same key if it exists.
+  Delete :: Tuple Conditions cols -> TabularDataAction cols
 
-applyTabularDataAction :: Table cols -> TabularDataAction cols -> Table cols
-applyTabularDataAction tbl = \case
+-- | In-memory table that supports 'TabularDataAction'.
+-- See 'applyTabularDataAction'.
+type family Table (cols :: Columns) :: Type where
+  Table ('WithUniqueKey keyCols cols) =
+    HM.HashMap (FlatTuple Id.Identity keyCols) (FlatTuple Id.Identity cols)
+  Table ('Flat cols) = [FlatTuple Id.Identity cols]
+
+class ApplyTabularDataAction f (cols :: Columns) where
+  -- | Apply some 'TabularDataAction' on an in-memory table and return a new
+  -- table.
+  applyTabularDataAction
+    :: Table cols -> TabularDataAction cols -> f (Table cols)
+
+instance Applicative f => ApplyTabularDataAction f ('Flat cols) where
+  applyTabularDataAction tbl = pure . \case
     Insert tuple -> tuple : tbl
     Update updates conditions ->
       map (\tuple ->
-            if tuple `match` conditions
+            if tuple `matches` conditions
               then update updates tuple
               else tuple) tbl
-    Delete conditions -> filter (`match` conditions) tbl
-
-match
-  :: Tuple Id.Identity cols
-  -> Tuple (Comp.Compose [] Condition) cols
-  -> Bool
-match = curry $ \case
-  (Nil, Nil) -> True
-  (Cons (Id.Identity x) xs, Cons (Comp.Compose conds) ys) ->
-    all (matchCond x) conds && xs `match` ys
-
-matchCond :: a -> Condition a -> Bool
-matchCond x = \case
-  Equal y -> x == y
-  NotEqual y -> x /= y
-  LowerThan y -> x < y
-  LowerThanOrEqual y -> x <= y
-  GreaterThan y -> x > y
-  GreaterThanOrEqual y -> x >= y
-
-update
-  :: Tuple Last cols
-  -> Tuple Id.Identity cols
-  -> Tuple Id.Identity cols
-update = curry $ \case
-  (Nil, Nil) -> Nil
-  (Cons (Last (Just x)) xs, Cons _ ys) -> Cons (pure x) (update xs ys)
-  (Cons (Last Nothing) xs, Cons y ys) -> Cons y (update xs ys)
-
--- TODO: Consecutive updates with the same conditions should be merged.
--- TODO: Inserts that will be updated later on should insert the final version.
---       => Reordering of the actions to put the insert at the end.
-optimiseActions :: [TabularDataAction cols] -> [TabularDataAction cols]
-optimiseActions =
-    mapLookingAhead optimiseInsertBeforeDelete
-
-  where
-    -- Consider inserts and check if it would be deleted in a subsequent action
-    -- considering any update in between that would affect it.
-    optimiseInsertBeforeDelete
-      :: TabularDataAction cols
-      -> [TabularDataAction cols]
-      -> Maybe (TabularDataAction cols)
-    optimiseInsertBeforeDelete action actions =
-      case action of
-        Delete _ -> Just action
-        Update _ _ -> Just action
-        Insert tuple -> do
-          guard . not $ isInsertBeforeDelete tuple actions
-          pure action
-
-    isInsertBeforeDelete
-      :: Tuple Id.Identity cols
-      -> [TabularDataAction cols]
-      -> Bool
-    isInsertBeforeDelete tuple = \case
-      [] -> False
-      Delete conds : actions ->
-        tuple `match` conds || isInsertBeforeDelete tuple actions
-      Update updates conds : actions
-        | tuple `match` conds ->
-            let tuple' = update updates tuple
-            in isInsertBeforeDelete tuple' actions
-        | otherwise -> isInsertBeforeDelete tuple actions
-      Insert _ : actions -> isInsertBeforeDelete tuple actions
-
-    mapLookingAhead :: (a -> [a] -> Maybe b) -> [a] -> [b]
-    mapLookingAhead f = \case
-      [] -> []
-      x : xs ->
-        case f x xs of
-          Nothing -> mapLookingAhead f xs
-          Just y  -> y : mapLookingAhead f xs
-
-class Field f (sym :: Symbol) a (cols :: [(Symbol, Type)]) | cols sym -> a where
-  cfield :: proxy sym -> f a -> Tuple f cols
-
-instance Monoid (Tuple f cols) => Field f sym a ('(sym, a) : cols) where
-  cfield _ x = Cons x mempty
+    Delete conditions -> filter (`matches` conditions) tbl
 
 instance
-    {-# OVERLAPPABLE #-}
-    (Monoid (f b), Field f sym a cols)
-    => Field f sym a ('(sym', b) : cols) where
-  cfield proxy x = Cons mempty (cfield proxy x)
+    ( AllColumns Show keyCols
+    , Exc.MonadError CQRS.Error m
+    , GetKeyAndConditions keyCols cols
+    , Hashable (FlatTuple Id.Identity keyCols)
+    , Ord (FlatTuple Id.Identity keyCols)
+    , MergeSplitTuple keyCols cols
+    )
+    => ApplyTabularDataAction m ('WithUniqueKey keyCols cols) where
 
-type Table cols = [Tuple Id.Identity cols]
+  applyTabularDataAction tbl = \case
+    Insert tuple -> do
+      let (keyTuple, otherTuple) = splitTuple tuple
+          op = \case
+            Nothing -> pure $ Just otherTuple
+            Just _ -> Exc.throwError . CQRS.ProjectionError $
+              "duplicate key on insert: " ++ show keyTuple
+      HM.alterF op keyTuple tbl
 
--- | A named tuple representing a row in the table.
-data Tuple :: (Type -> Type) -> [(Symbol, Type)] -> Type where
-  Nil  :: Tuple f '[]
-  Cons :: f a -> Tuple f cols -> Tuple f ('(sym, a) ': cols)
+    Update updates conditions ->
+      case getKeyAndConditions conditions of
+        Just (keyTuple, otherConditions) ->
+          case HM.lookup keyTuple tbl of
+            Nothing -> pure tbl
+            Just otherTuple
+              | otherTuple `matches` otherConditions -> do
+                  let (keyTuple', otherTuple') =
+                        splitTuple . update updates . mergeTuple
+                          $ (keyTuple, otherTuple)
+                  if keyTuple == keyTuple'
+                    then pure $ HM.insert keyTuple otherTuple' tbl
+                    else
+                      case HM.lookup keyTuple' tbl of
+                        Nothing ->
+                          pure . HM.delete keyTuple
+                            . HM.insert keyTuple' otherTuple' $ tbl
+                        Just _ ->
+                          Exc.throwError . CQRS.ProjectionError $
+                            "duplicate key on update: " ++ show keyTuple'
+              | otherwise -> pure tbl
 
-(~:) :: Applicative f => a -> Tuple f cols -> Tuple f ('(sym, a) ': cols)
-(~:) x xs = Cons (pure x) xs
+        -- It traverses the hash map collecting changing values if the key
+        -- doesn't change but the row matches the condition. When the key
+        -- changes, it keeps track of the key that has to be deleted and the new
+        -- row that has to be inserted. After the traversal, it deletes all the
+        -- rows in the first list and inserts all the rows from the second
+        -- checking for duplicated keys.
+        Nothing -> do
+          let step keyTuple otherTuple = do
+                let merged = mergeTuple (keyTuple, otherTuple)
+                if merged `matches` conditions
+                  then do
+                    let (keyTuple', otherTuple') =
+                          splitTuple $ update updates merged
+                    if keyTuple == keyTuple'
+                      then pure $ Just otherTuple'
+                      else do
+                        St.modify' $ \(tbd, tbi) ->
+                          (keyTuple : tbd, (keyTuple', otherTuple') : tbi)
+                        pure $ Just otherTuple
+                  else pure $ Just otherTuple
 
-infixr 5 ~:
+              (toBeDeleted, toBeInserted) =
+                St.execState (HM.traverseWithKey step tbl) ([], [])
 
-empty :: Tuple f '[]
-empty = Nil
+              tbl' = foldl' (flip HM.delete) tbl toBeDeleted
 
--- | Create a tuple with the given field set to the given value.
---
--- It is meant to be used together with @TypeApplications@, e.g.
--- @
--- field @"field_name" value
--- @
-field
-  :: forall sym f a cols.
-     (Applicative f, Field f sym a cols)
-  => a -> Tuple f cols
-field value = cfield (Proxy :: Proxy sym) (pure value)
+          foldM
+            (\t (keyTuple, otherTuple) ->
+              case HM.lookup keyTuple t of
+                Just _ -> Exc.throwError . CQRS.ProjectionError $
+                  "duplicate key on update: " ++ show keyTuple
+                Nothing -> pure . HM.insert keyTuple otherTuple $ t
+            )
+            tbl' toBeInserted
 
--- | Create a tuple with the given field set to the given "wrapped" value.
---
--- It is more flexible than 'field' but less convenient to use if the goal is to
--- simply wrap the value inside the 'Applicative'.
-ffield
-  :: forall sym f a cols. (Field f sym a cols)
-  => f a -> Tuple f cols
-ffield fvalue = cfield (Proxy :: Proxy sym) fvalue
+    Upsert tuple -> do
+      let (keyTuple, otherTuple) = splitTuple tuple
+      pure $ HM.insert keyTuple otherTuple tbl
 
-instance Eq (Tuple f '[]) where
-  Nil == Nil = True
+    Delete conditions ->
+      case getKeyAndConditions conditions of
+        Just (keyTuple, otherConditions) -> do
+          let op = \case
+                Nothing -> Nothing
+                Just otherTuple
+                  | otherTuple `matches` otherConditions -> Nothing
+                  | otherwise -> Just otherTuple
+          pure . HM.alter op keyTuple $ tbl
 
-instance (Eq (f a), Eq (Tuple f cols)) => Eq (Tuple f ('(sym, a) ': cols)) where
-  Cons x xs == Cons y ys = x == y && xs == ys
-
-instance Semigroup (Tuple f '[]) where
-  Nil <> Nil = Nil
-
-instance
-    (Semigroup (f a), Semigroup (Tuple f cols))
-    => Semigroup (Tuple f ('(sym, a) ': cols)) where
-  Cons x xs <> Cons y ys = Cons (x <> y) (xs <> ys)
-
-instance Monoid (Tuple f '[]) where
-  mempty = Nil
-
-instance
-    (Monoid (f a), Monoid (Tuple f xs))
-    => Monoid (Tuple f ('(sym, a) ': xs)) where
-  mempty = Cons mempty mempty
-
-type family AllColumns
-    (cs :: Type -> Constraint) (cols :: [(Symbol, Type)]) :: Constraint where
-  AllColumns _ '[] = ()
-  AllColumns cs ('(sym, a) ': cols) =
-    (cs a, KnownSymbol sym, AllColumns cs cols)
-
--- | Transform a tuple into a list of pairs given a function to transform the
--- field values.
---
--- @cs@ is some constraint that the values need to satisfy. For example,
--- @
--- toList @Show (\name value -> (name, maybe "NULL" show (getLast value)))
---   :: Tuple Last cols -> [(String, String)]
--- @
-toList
-  :: forall cs f cols b. AllColumns cs cols
-  => (forall a. cs a => String -> f a -> b) -> Tuple f cols -> [b]
-toList f = \case
-    Nil -> []
-    pair@(Cons _ _) -> go Proxy pair
-  where
-    go
-      :: (KnownSymbol sym, cs a, AllColumns cs cols')
-      => Proxy sym -> Tuple f ('(sym, a) ': cols') -> [b]
-    go proxy (Cons x xs) =
-      f (symbolVal proxy) x : toList @cs f xs
+        Nothing -> do
+          let op keyTuple otherTuple
+                | mergeTuple (keyTuple, otherTuple) `matches` conditions =
+                    Nothing
+                | otherwise = Just otherTuple
+          pure . HM.mapMaybeWithKey op $ tbl
