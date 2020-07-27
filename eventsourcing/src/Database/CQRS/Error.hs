@@ -14,4 +14,5 @@ data Error
   | ProjectionError String
   | MigrationError String
   | ConsistencyCheckError String
+  | TrackingTableError String
   deriving (Eq, Show, Generic)

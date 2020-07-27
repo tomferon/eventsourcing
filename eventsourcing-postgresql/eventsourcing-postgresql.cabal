@@ -20,6 +20,7 @@ library
     Database.CQRS.PostgreSQL.SQLQuery
     Database.CQRS.PostgreSQL.Stream
     Database.CQRS.PostgreSQL.StreamFamily
+    Database.CQRS.PostgreSQL.TrackingTable
 
   other-modules:
     Database.CQRS.PostgreSQL.Internal

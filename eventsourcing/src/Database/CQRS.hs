@@ -26,6 +26,12 @@ module Database.CQRS
   , Aggregator
   , EffectfulProjection
   , runAggregator
+  , runProjection
+  , TrackedState(..)
+  , TrackingTable(..)
+  , InMemoryTrackingTable(..)
+  , createInMemoryTrackingTable
+  , executeInMemoryActions
 
     -- * Read models
   , ReadModel(..)

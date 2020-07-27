@@ -35,7 +35,7 @@ import qualified Database.PostgreSQL.Simple.ToField      as PG.To
 import qualified Database.PostgreSQL.Simple.ToRow        as PG.To
 import qualified Pipes
 
-import Database.CQRS.PostgreSQL.Internal (SomeParams(..))
+import Database.CQRS.PostgreSQL.Internal (SomeParams(..), handleError)
 import Database.CQRS.PostgreSQL.Stream
 
 import qualified Database.CQRS as CQRS
@@ -220,8 +220,9 @@ streamFamilyAllNewEvents StreamFamily{..} = liftIO $ do
           eRes <- liftIO $
             (Right <$> PG.execute_ conn ("LISTEN " <> notificationChannel))
               `catches`
-                [ handleError (Proxy @PG.FormatError) CQRS.NewEventsStreamingError
-                , handleError (Proxy @PG.SqlError)    CQRS.NewEventsStreamingError
+                [ handleError (Proxy @PG.FormatError)
+                    CQRS.NewEventsStreamingError
+                , handleError (Proxy @PG.SqlError) CQRS.NewEventsStreamingError
                 ]
           either Exc.throwError (\_ -> pure ()) eRes
           liftIO $ putMVar startedMVar ()
@@ -366,11 +367,6 @@ streamFamilyLastEventIdentifiers StreamFamily{..} = do
       <> "max(" <> eventIdentifierColumn
       <> ") FROM " <> relation
       <> " GROUP BY " <> streamIdentifierColumn
-
-handleError
-  :: forall e e' a proxy. (Exception e, Show e)
-  => proxy e -> (String -> e') -> Handler (Either e' a)
-handleError _ f = Handler $ pure . Left . f . show @e
 
 -- | Run two threads concurrently and return the result of the first one to
 -- write to the givem 'TMVar'. If the first thread to finish does so because

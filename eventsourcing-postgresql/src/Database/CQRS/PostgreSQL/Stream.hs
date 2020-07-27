@@ -18,7 +18,7 @@ module Database.CQRS.PostgreSQL.Stream
   , makeStream'
   ) where
 
-import Control.Exception          (Exception, Handler(..), catches)
+import Control.Exception          (catches)
 import Control.Monad              (when)
 import Control.Monad.Trans        (MonadIO(..))
 import Data.Functor               ((<&>))
@@ -36,7 +36,7 @@ import qualified Database.PostgreSQL.Simple.ToField   as PG.To
 import qualified Database.PostgreSQL.Simple.ToRow     as PG.To
 import qualified Pipes
 
-import Database.CQRS.PostgreSQL.Internal (SomeParams(..))
+import Database.CQRS.PostgreSQL.Internal (SomeParams(..), handleError)
 
 import qualified Database.CQRS as CQRS
 
@@ -299,8 +299,3 @@ streamStreamEvents Stream{..} bounds =
 
     batchSize :: Int
     batchSize = 100
-
-handleError
-  :: forall e e' a proxy. (Exception e, Show e)
-  => proxy e -> (String -> e') -> Handler (Either e' a)
-handleError _ f = Handler $ pure . Left . f . show @e

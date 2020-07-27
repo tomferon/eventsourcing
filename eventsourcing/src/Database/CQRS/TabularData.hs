@@ -79,7 +79,6 @@ module Database.CQRS.TabularData
   , field
   , ffield
   , MergeSplitTuple(..)
-  , runProjectionWith
   , applyTabularDataAction
   , GetKeyAndConditions
   , AllColumns
@@ -91,14 +90,11 @@ import Data.Hashable (Hashable(..))
 import Data.Kind (Type)
 import Data.List (foldl')
 import Data.Monoid (Last(..))
-import Pipes ((>->))
 
-import qualified Control.Concurrent.STM     as STM
 import qualified Control.Monad.Except       as Exc
 import qualified Control.Monad.Identity     as Id
 import qualified Control.Monad.State.Strict as St
 import qualified Data.HashMap.Strict        as HM
-import qualified Pipes
 
 import Database.CQRS.TabularData.Internal
 

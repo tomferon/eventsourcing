@@ -8,9 +8,15 @@ module Database.CQRS.PostgreSQL
   , StreamFamily
   , makeStreamFamily
 
+  -- * Projection
+  , Projection
+  , executeSqlActions
+  , executeCustomActions
+  , fromTabularDataActions
   , createTrackingTable
   ) where
 
-import Database.CQRS.PostgreSQL.Internal
+import Database.CQRS.PostgreSQL.Projection
 import Database.CQRS.PostgreSQL.Stream
 import Database.CQRS.PostgreSQL.StreamFamily
+import Database.CQRS.PostgreSQL.TrackingTable
