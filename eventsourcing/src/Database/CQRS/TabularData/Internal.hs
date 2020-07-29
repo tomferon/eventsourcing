@@ -1,3 +1,4 @@
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE RankNTypes #-}
@@ -25,7 +26,6 @@ module Database.CQRS.TabularData.Internal where
 import Data.Hashable (Hashable(..))
 import Data.Kind (Constraint, Type)
 import Data.Proxy (Proxy(..))
-import Data.Monoid (Last(..))
 import GHC.TypeLits (symbolVal, KnownSymbol, Symbol)
 
 import qualified Control.Monad.Identity as Id
@@ -51,6 +51,9 @@ instance Semigroup (Conditions a) where
 instance Monoid (Conditions a) where
   mempty = Conditions []
 
+instance Eq a => Wrapper Conditions a where
+  wrap = Conditions . pure . Equal
+
 -- | Kind of types that describe columns of a table.
 --
 -- This is not intended as a type. It's promoted to a kind.
@@ -74,11 +77,13 @@ data FlatTuple :: (Type -> Type) -> [(Symbol, Type)] -> Type where
   Nil  :: FlatTuple f '[]
   Cons :: f a -> FlatTuple f cols -> FlatTuple f ('(sym, a) ': cols)
 
-(~:)
-  :: Applicative f => a -> FlatTuple f cols -> FlatTuple f ('(sym, a) ': cols)
-(~:) x xs = Cons (pure x) xs
+pattern (:~)
+  :: a
+  -> FlatTuple Id.Identity cols
+  -> FlatTuple Id.Identity ('(sym, a) ': cols)
+pattern x :~ xs = Cons (Id.Identity x) xs
 
-infixr 5 ~:
+infixr 5 :~
 
 empty :: FlatTuple f '[]
 empty = Nil
@@ -144,7 +149,11 @@ instance
     => Field f sym a ('(sym', b) : cols) where
   cfield proxy x = Cons mempty (cfield proxy x)
 
--- | Create a tuple with the given field set to the given value.
+class Wrapper f a where
+  wrap :: a -> f a
+
+-- | Create a tuple with the given field set to the given value wrapped into
+-- @f@. In practice, @f@ is 'Conditions' or 'Update'.
 --
 -- It is meant to be used together with @TypeApplications@, e.g.
 -- @
@@ -152,9 +161,9 @@ instance
 -- @
 field
   :: forall cols sym f a.
-     (Applicative f, Field f sym a (Flatten cols))
+     (Field f sym a (Flatten cols), Wrapper f a)
   => a -> Tuple f cols
-field value = cfield (Proxy :: Proxy sym) (pure value)
+field value = cfield (Proxy :: Proxy sym) (wrap value)
 
 -- | Create a tuple with the given field set to the given "wrapped" value.
 --
@@ -235,7 +244,7 @@ instance
     case getConditions cond of
       [Equal x] -> do
         (tuple, otherConditions) <- getKeyAndConditions conds
-        pure (x ~: tuple, otherConditions)
+        pure (x :~ tuple, otherConditions)
       _ -> Nothing
 
 matches
@@ -256,11 +265,35 @@ matchesCond x = \case
   GreaterThan y -> x > y
   GreaterThanOrEqual y -> x >= y
 
+data Update a where
+  NoUpdate :: Update a
+  Set      :: a -> Update a
+  Plus     :: Num a => a -> Update a
+  Minus    :: Num a => a -> Update a
+
+deriving instance Show a => Show (Update a)
+
+instance Semigroup (Update a) where
+  u1 <> u2 =
+    case u2 of
+      NoUpdate -> u1
+      _ -> u2
+
+instance Monoid (Update a) where
+  mempty = NoUpdate
+
+instance Wrapper Update a where
+  wrap = Set
+
 update
-  :: FlatTuple Last cols
+  :: FlatTuple Update cols
   -> FlatTuple Id.Identity cols
   -> FlatTuple Id.Identity cols
 update = curry $ \case
   (Nil, Nil) -> Nil
-  (Cons (Last (Just x)) xs, Cons _ ys) -> Cons (pure x) (update xs ys)
-  (Cons (Last Nothing) xs, Cons y ys) -> Cons y (update xs ys)
+  (Cons NoUpdate xs, Cons y ys) -> Cons y (update xs ys)
+  (Cons (Set x) xs, Cons _ ys) -> Cons (pure x) (update xs ys)
+  (Cons (Plus x) xs, Cons (Id.Identity y) ys) ->
+    Cons (pure (y+x)) (update xs ys)
+  (Cons (Minus x) xs, Cons (Id.Identity y) ys) ->
+    Cons (pure (y-x)) (update xs ys)

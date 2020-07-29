@@ -1,3 +1,6 @@
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE TupleSections #-}
+{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FunctionalDependencies #-}
@@ -5,10 +8,9 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
 module Database.CQRS.Projection
-  ( Projection
-  , Aggregator
-  , EffectfulProjection
+  ( Aggregator
   , runAggregator
+  , Projection
   , runProjection
   , TrackedState(..)
   , TrackingTable(..)
@@ -17,10 +19,9 @@ module Database.CQRS.Projection
   , executeInMemoryActions
   ) where
 
-import Control.Monad (unless, forever, void)
+import Control.Monad
 import Control.Monad.Trans (MonadIO(..), lift)
 import Data.Hashable (Hashable)
-import Data.List
 import Data.Tuple (swap)
 import Pipes ((>->))
 
@@ -34,19 +35,14 @@ import Database.CQRS.Error
 import Database.CQRS.Stream
 import Database.CQRS.StreamFamily
 
--- | A projection is simply a function consuming events and producing results
--- in an environment @f@.
-type Projection f event a =
-  event -> f a
-
--- | Projection aggregating a state in memory.
+-- | Function aggregating a state in memory.
 type Aggregator event agg =
   event -> St.State agg ()
 
 -- | Projection returning actions that can be batched and executed.
 --
 -- This can be used to batch changes to tables in a database for example.
-type EffectfulProjection event st action =
+type Projection event st action =
   event -> St.State st [action]
 
 -- | Run an 'Aggregator' on events from a stream starting with a given state and
@@ -103,17 +99,17 @@ runProjection
   => streamFamily
   -> (StreamIdentifier streamFamily -> st)
      -- ^ Initialise state when no events have been processed yet.
-  -> EffectfulProjection
+  -> Projection
       (EventWithContext' (StreamType streamFamily))
       st action
   -> trackingTable
   -> (trackingTable
-      -> Pipes.Consumer
-          ( st
-          , [action]
-          , StreamIdentifier streamFamily
-          , EventIdentifier (StreamType streamFamily)
-          ) m ())
+      -> ( st
+         , [action]
+         , StreamIdentifier streamFamily
+         , EventIdentifier (StreamType streamFamily)
+         )
+      -> m ())
   -- ^ Commit the custom actions. See 'executeSqlActions' for 'SqlAction's.
   -- This consumer is expected to update the tracking table accordingly.
   -> m ()
@@ -124,8 +120,10 @@ runProjection streamFamily initState projection trackingTable
       latestEventIdentifiers streamFamily >-> catchUp
       newEvents
         >-> groupByStream
-        >-> familyProjectionPipe
-        >-> executeActions trackingTable
+        >-> bisectFailingBatches id
+              (\batch -> Pipes.runEffect $
+                Pipes.for (projectionPipe batch)
+                  (lift . executeActions trackingTable))
 
   where
     catchUp
@@ -139,28 +137,28 @@ runProjection streamFamily initState projection trackingTable
       state <- lift $ getTrackedState trackingTable streamId
 
       lift . Pipes.runEffect $ case state of
-        NeverRan -> catchUp' streamId stream mempty (initState streamId)
-        SuccessAt lastSuccesfulEventId st
+        NeverRan -> catchUp' streamId stream mempty
+        SuccessAt lastSuccesfulEventId _
           | lastSuccesfulEventId < eventId ->
-              catchUp' streamId stream (afterEvent lastSuccesfulEventId) st
+              catchUp' streamId stream (afterEvent lastSuccesfulEventId)
           | otherwise -> pure ()
         -- We are catching up, so maybe the executable was restarted and this
         -- stream won't fail this time.
-        FailureAt (Just (lastSuccessfulEventId, st)) _ ->
-          catchUp' streamId stream (afterEvent lastSuccessfulEventId) st
-        FailureAt Nothing _ ->
-          catchUp' streamId stream mempty (initState streamId)
+        FailureAt (Just (lastSuccessfulEventId, _)) _ _ ->
+          catchUp' streamId stream (afterEvent lastSuccessfulEventId)
+        FailureAt Nothing _ _ -> catchUp' streamId stream mempty
 
     catchUp'
       :: StreamIdentifier streamFamily
       -> StreamType streamFamily
       -> StreamBounds' (StreamType streamFamily)
-      -> st
       -> Pipes.Effect m ()
-    catchUp' streamId stream bounds st =
+    catchUp' streamId stream bounds =
       streamEvents stream bounds
-        >-> streamProjectionPipe streamId st
-        >-> executeActions trackingTable
+        >-> bisectFailingBatches (streamId,)
+              (\batch -> Pipes.runEffect $
+                Pipes.for (projectionPipe batch)
+                  (lift . executeActions trackingTable))
 
     groupByStream
       :: Pipes.Pipe
@@ -178,61 +176,52 @@ runProjection streamFamily initState projection trackingTable
     groupByStream = forever $ do
       events <- Pipes.await
       let eventsByStream =
-            HM.toList . HM.fromListWith (++) . map (fmap pure) $ events
+            HM.toList . HM.fromListWith (flip (++)) . map (fmap pure) $ events
       Pipes.each eventsByStream
 
-    familyProjectionPipe
-      :: Pipes.Pipe
-          ( StreamIdentifier streamFamily
-          , [ Either
-                (EventIdentifier (StreamType streamFamily), String)
-                (EventWithContext' (StreamType streamFamily)) ]
-          )
+    -- It must be used with 'Pipes.for' to ensure the execution continues after
+    -- the call to 'Pipes.yield'.
+    projectionPipe
+      :: ( StreamIdentifier streamFamily
+         , [ Either
+              (EventIdentifier (StreamType streamFamily), String)
+              (EventWithContext' (StreamType streamFamily)) ] )
+      -> Pipes.Producer
           ( st
           , [action]
           , StreamIdentifier streamFamily
           , EventIdentifier (StreamType streamFamily)
           ) m ()
-    familyProjectionPipe = forever $ do
-      (streamId, eEvents) <- Pipes.await
-
-      state <- lift $ getTrackedState trackingTable streamId
-
+    projectionPipe (streamId, eEvents) = do
       let filterEventsAfter eventId = filter $ \case
             Left (eventId', _) -> eventId' > eventId
             Right EventWithContext{ identifier = eventId' } ->
               eventId' > eventId
 
+      state <- lift $ getTrackedState trackingTable streamId
       case state of
         NeverRan ->
-          void $ coreProjectionPipe streamId (initState streamId) eEvents
+          coreProjectionPipe streamId (initState streamId) eEvents
         SuccessAt lastSuccesfulEventId st ->
-          void
-            . coreProjectionPipe streamId st
+          coreProjectionPipe streamId st
             . filterEventsAfter lastSuccesfulEventId
             $ eEvents
-        -- This is used after catching up. If it's still marked as failed, all
-        -- hope is lost.
-        FailureAt _ _ -> pure ()
-
-    streamProjectionPipe
-      :: StreamIdentifier streamFamily
-      -> st
-      -> Pipes.Pipe
-          [ Either
-              (EventIdentifier (StreamType streamFamily), String)
-              (EventWithContext' (StreamType streamFamily)) ]
-          ( st
-          , [action]
-          , StreamIdentifier streamFamily
-          , EventIdentifier (StreamType streamFamily)
-          ) m ()
-    streamProjectionPipe streamId st = do
-      eEvents <- Pipes.await
-      mSt' <- coreProjectionPipe streamId st eEvents
-      case mSt' of
-        Just st' -> streamProjectionPipe streamId st'
-        Nothing -> pure ()
+        -- If this batch has events lower than the identifier for which the
+        -- projection has failed, it means this is part of the catch-up phase.
+        -- It happens after a restart, so the code might have changed and we
+        -- should retry.
+        FailureAt mSuccess eventId _ -> do
+          let check = \case
+                Left (eventId', _) -> eventId' <= eventId
+                Right EventWithContext{..} -> identifier <= eventId
+          when (any check eEvents) $
+            case mSuccess of
+              Nothing ->
+                coreProjectionPipe streamId (initState streamId) eEvents
+              Just (lastSuccesfulEventId, st) ->
+                coreProjectionPipe streamId st
+                  . filterEventsAfter lastSuccesfulEventId
+                  $ eEvents
 
     coreProjectionPipe
       :: StreamIdentifier streamFamily
@@ -240,13 +229,12 @@ runProjection streamFamily initState projection trackingTable
       -> [ Either
             (EventIdentifier (StreamType streamFamily), String)
             (EventWithContext' (StreamType streamFamily)) ]
-      -> Pipes.Pipe
-          a -- It's not supposed to consume any data.
+      -> Pipes.Producer
           ( st
           , [action]
           , StreamIdentifier streamFamily
           , EventIdentifier (StreamType streamFamily)
-          ) m (Maybe st) -- Nothing in case of failure.
+          ) m ()
     coreProjectionPipe streamId st eEvents = do
       -- "Healthy" events up until the first error if any. We want to process
       -- the events before throwing the error so that chunking as no effect on
@@ -265,10 +253,57 @@ runProjection streamFamily initState projection trackingTable
         Pipes.yield (st', actions, streamId, latestEventId)
 
       case mFirstError of
-        Nothing -> pure Nothing
+        Nothing -> pure ()
         Just (eventId, err) -> do
           lift $ upsertError trackingTable streamId eventId err
-          pure $ Just st'
+          pure ()
+
+    bisectFailingBatches
+      :: (a
+          -> ( StreamIdentifier streamFamily
+             , [ Either
+                  (EventIdentifier (StreamType streamFamily), String)
+                  (EventWithContext' (StreamType streamFamily)) ]))
+      -> (( StreamIdentifier streamFamily
+          , [ Either
+                (EventIdentifier (StreamType streamFamily), String)
+                (EventWithContext' (StreamType streamFamily)) ])
+          -> m ())
+      -> Pipes.Consumer a m ()
+    bisectFailingBatches split f = forever $ do
+        input <- Pipes.await
+        let (streamId, batch) = split input
+        void . lift $ go streamId batch
+
+      where
+        go
+          :: StreamIdentifier streamFamily
+          -> [ Either
+                (EventIdentifier (StreamType streamFamily), String)
+                (EventWithContext' (StreamType streamFamily)) ]
+          -> m Bool
+        go streamId batch =
+          Exc.catchError
+            (f (streamId, batch) >> pure True)
+            (\err -> case (err, batch) of
+              (ProjectionError _, _ : _ : _) -> do
+                let len = length batch
+                    (batch1, batch2) =
+                      splitAt (floor @Double (fromIntegral len / 2)) batch
+                succeeded <- go streamId batch1
+                if succeeded
+                  then go streamId batch2
+                  else pure False
+
+              (ProjectionError err', [Left (eventId, _)]) -> do
+                upsertError trackingTable streamId eventId err'
+                pure False
+
+              (ProjectionError err', [Right EventWithContext{..}]) -> do
+                upsertError trackingTable streamId identifier err'
+                pure False
+
+              _ -> Exc.throwError err)
 
 -- | Return all the 'Right' elements before the first 'Left' and the value of
 -- the first 'Left'.
@@ -284,8 +319,9 @@ stopOnLeft = go id
 data TrackedState identifier st
   = NeverRan
   | SuccessAt identifier st
-  | FailureAt (Maybe (identifier, st)) identifier
+  | FailureAt (Maybe (identifier, st)) identifier String
     -- ^ Last succeeded at, failed at.
+  deriving (Eq, Show)
 
 class
     TrackingTable m table streamId eventId st
@@ -309,8 +345,8 @@ instance
       pure $ case HM.lookup streamId hm of
         Nothing -> NeverRan
         Just (Nothing, Nothing) -> NeverRan -- This actually can't happen.
-        Just (successPair, Just (eventId, _)) ->
-          FailureAt successPair eventId
+        Just (successPair, Just (eventId, err)) ->
+          FailureAt successPair eventId err
         Just (Just (eventId, st), Nothing) -> SuccessAt eventId st
 
   upsertError (InMemoryTrackingTable tvar) streamId eventId err =
@@ -327,20 +363,29 @@ createInMemoryTrackingTable =
   liftIO . fmap InMemoryTrackingTable . STM.newTVarIO $ HM.empty
 
 executeInMemoryActions
-  :: ( Hashable streamId
+  :: ( Exc.MonadError Error m
+     , Hashable streamId
      , MonadIO m
      , Ord streamId
      )
   => STM.TVar projected
-  -> (projected -> action -> projected)
+  -> (projected -> action -> Either Error projected)
+     -- ^ For tabular data actions, use `applyTabularDataAction`.
   -> InMemoryTrackingTable streamId eventId st
-  -> Pipes.Consumer (st, [action], streamId, eventId) m ()
-executeInMemoryActions tvar applyAction (InMemoryTrackingTable trackingTVar) =
-  forever $ do
-    (st, actions, streamId, eventId) <- Pipes.await
+  -> (st, [action], streamId, eventId)
+  -> m ()
+executeInMemoryActions
+    tvar applyAction (InMemoryTrackingTable trackingTVar)
+    (st, actions, streamId, eventId) =
 
-    liftIO . STM.atomically $ do
-      STM.modifyTVar' tvar $ \projected ->
-        foldl' applyAction projected actions
-      STM.modifyTVar' trackingTVar $
-        HM.insert streamId (Just (eventId, st), Nothing)
+  Exc.liftEither <=< liftIO . STM.atomically $ do
+    projected <- STM.readTVar tvar
+
+    case foldM applyAction projected actions of
+      Left err -> pure $ Left err
+
+      Right projected' -> do
+        STM.writeTVar tvar projected'
+        STM.modifyTVar' trackingTVar $
+          HM.insert streamId (Just (eventId, st), Nothing)
+        pure $ Right ()

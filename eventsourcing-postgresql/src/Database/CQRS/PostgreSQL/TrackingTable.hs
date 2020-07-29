@@ -57,15 +57,15 @@ instance
   getTrackedState TrackingTable{..} streamId =
     handlePgErrors . connectionPool $ \conn -> do
       let query =
-            "SELECT event_id, failed_event_id, state FROM "
+            "SELECT event_id, failed_event_id, failed_message, state FROM "
             <> relation <> " WHERE stream_id = ?"
       rows <- PG.query conn query (PG.Only streamId)
       pure $ case rows of
-        [(Just eventId, Nothing, SomeState state)] ->
+        [(Just eventId, Nothing, Nothing, SomeState state)] ->
           CQRS.SuccessAt eventId state
-        [(mEventId, Just failedAt, oState)] ->
+        [(mEventId, Just failedAt, Just err, oState)] ->
           CQRS.FailureAt
-            ((,) <$> mEventId <*> fromOptionalState oState) failedAt
+            ((,) <$> mEventId <*> fromOptionalState oState) failedAt err
         _ -> CQRS.NeverRan
 
   upsertError

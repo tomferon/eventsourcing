@@ -25,7 +25,7 @@ import qualified Control.Monad.Except as Exc
 import qualified Hedgehog.Gen         as Gen
 import qualified Hedgehog.Range       as Range
 
-import Helpers (collect)
+import Helpers (collect, interleaveSeqs)
 
 import qualified Database.CQRS          as CQRS
 import qualified Database.CQRS.InMemory as CQRS.InMem
@@ -144,16 +144,3 @@ eventsDroppedAndMerged = do
         length batch === 1
       when (any (either (const False) isDeletedEvent) batch) $
         length batch === 1
-
-interleaveSeqs :: [a] -> [a] -> Gen [a]
-interleaveSeqs = go id
-  where
-    go :: ([a] -> [a]) -> [a] -> [a] -> Gen [a]
-    go acc [] [] = pure $ acc []
-    go acc [] ys = pure $ acc ys
-    go acc xs [] = pure $ acc xs
-    go acc (x:xs) (y:ys) =
-      Gen.choice
-        [ go (acc . (x:)) xs (y:ys)
-        , go (acc . (y:)) (x:xs) ys
-        ]

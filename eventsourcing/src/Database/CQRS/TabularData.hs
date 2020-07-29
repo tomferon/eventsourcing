@@ -11,6 +11,7 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -69,11 +70,15 @@ module Database.CQRS.TabularData
   , lowerThanOrEqual
   , greaterThan
   , greaterThanOrEqual
+  , Update(..)
+  , set
+  , plus
+  , minus
   , Columns(..)
   , Tuple
   , Flatten
   , FlatTuple(..)
-  , (~:)
+  , pattern (:~)
   , empty
   , Table
   , field
@@ -89,7 +94,6 @@ import Control.Monad (foldM)
 import Data.Hashable (Hashable(..))
 import Data.Kind (Type)
 import Data.List (foldl')
-import Data.Monoid (Last(..))
 
 import qualified Control.Monad.Except       as Exc
 import qualified Control.Monad.Identity     as Id
@@ -118,18 +122,30 @@ greaterThan = Conditions . pure . GreaterThan
 greaterThanOrEqual :: Ord a => a -> Conditions a
 greaterThanOrEqual = Conditions . pure . GreaterThanOrEqual
 
+set :: a -> Update a
+set = Set
+
+plus :: Num a => a -> Update a
+plus = Plus
+
+minus :: Num a => a -> Update a
+minus = Minus
+
 -- | Action on tabular data with an index.
 --
 -- Its purpose is to be used by an 'EffectfulProjection' to create persisting
 -- backend-agnostic projections.
 data TabularDataAction (cols :: Columns) where
   Insert :: Tuple Id.Identity cols -> TabularDataAction cols
-  Update :: Tuple Last cols -> Tuple Conditions cols -> TabularDataAction cols
+  Update :: Tuple Update cols -> Tuple Conditions cols -> TabularDataAction cols
   Upsert
     :: Tuple Id.Identity ('WithUniqueKey keyCols cols)
     -> TabularDataAction ('WithUniqueKey keyCols cols)
     -- ^ Insert a new row or update the row with the same key if it exists.
   Delete :: Tuple Conditions cols -> TabularDataAction cols
+
+deriving instance
+  AllColumns Show (Flatten cols) => Show (TabularDataAction cols)
 
 -- | In-memory table that supports 'TabularDataAction'.
 -- See 'applyTabularDataAction'.

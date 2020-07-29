@@ -247,6 +247,7 @@ streamFamilyAllNewEvents
 streamFamilyAllNewEvents StreamFamily{..} = do
     queue <- initialise
     pure $ producer queue
+
   where
     initialise
       :: m (STM.TBQueue

@@ -21,11 +21,10 @@ module Database.CQRS
     -- * Stream families
   , StreamFamily(..)
 
-    -- * Projections
-  , Projection
+    -- * Aggregators and projections
   , Aggregator
-  , EffectfulProjection
   , runAggregator
+  , Projection
   , runProjection
   , TrackedState(..)
   , TrackingTable(..)

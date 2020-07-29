@@ -22,7 +22,6 @@ import Control.Exception
 import Control.Monad              ((<=<), forever, forM_)
 import Control.Monad.Trans        (MonadIO(..), lift)
 import Data.List                  (intersperse)
-import Data.Monoid                (Last(..))
 import Data.Proxy                 (Proxy(..))
 import Data.String                (fromString)
 import Database.PostgreSQL.Simple ((:.)(..))
@@ -42,7 +41,7 @@ import Database.CQRS.PostgreSQL.TrackingTable
 import qualified Database.CQRS             as CQRS
 import qualified Database.CQRS.TabularData as CQRS.Tab
 
-type Projection event st = CQRS.EffectfulProjection event st SqlAction
+type Projection event st = CQRS.Projection event st SqlAction
 
 -- | Execute the SQL actions and update the tracking table in one transaction.
 --
@@ -201,7 +200,7 @@ makeUpdateSqlAction
   :: forall (cols ::  CQRS.Tab.Columns).
      CQRS.Tab.AllColumns PG.To.ToField (CQRS.Tab.Flatten cols)
   => PG.Query
-  -> CQRS.Tab.Tuple Last cols
+  -> CQRS.Tab.Tuple CQRS.Tab.Update cols
   -> CQRS.Tab.Tuple CQRS.Tab.Conditions cols
   -> SqlAction
 makeUpdateSqlAction relation updates conds =
@@ -209,14 +208,29 @@ makeUpdateSqlAction relation updates conds =
         Bifunctor.bimap (mconcat . intersperse ",") mconcat
         . unzip
         . CQRS.Tab.toList @PG.To.ToField
-            (\name value -> case getLast value of
-              Nothing -> ("", [])
-              Just x  ->
+            (\name update -> case update of
+              CQRS.Tab.NoUpdate -> ("", [])
+              CQRS.Tab.Set x ->
                 ( "? = ?"
                 , [ PG.To.toField (fromString @PG.Identifier name)
                   , PG.To.toField x
                   ]
-                ))
+                )
+              CQRS.Tab.Plus x ->
+                ( "? = ? + ?"
+                , [ PG.To.toField (fromString @PG.Identifier name)
+                  , PG.To.toField (fromString @PG.Identifier name)
+                  , PG.To.toField x
+                  ]
+                )
+              CQRS.Tab.Minus x ->
+                ( "? = ? - ?"
+                , [ PG.To.toField (fromString @PG.Identifier name)
+                  , PG.To.toField (fromString @PG.Identifier name)
+                  , PG.To.toField x
+                  ]
+                )
+             )
         $ updates
 
       (whereStmtQuery, whereStmtValues) = makeWhereStatement @cols conds

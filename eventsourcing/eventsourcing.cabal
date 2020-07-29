@@ -46,10 +46,11 @@ test-suite unit-tests
   main-is:           Main.hs
   hs-source-dirs:    test
   default-language:  Haskell2010
-  ghc-options:       -Wall
+  ghc-options:       -Wall -threaded
 
   other-modules:
     Database.CQRS.InMemoryTest
+    Database.CQRS.TabularDataTest
     Database.CQRS.TransformerTest
     Helpers
 
@@ -60,5 +61,7 @@ test-suite unit-tests
     hedgehog >=1.0,
     mtl,
     pipes,
+    stm,
     tasty >=1.2,
-    tasty-hedgehog >=1.0
+    tasty-hedgehog >=1.0,
+    unordered-containers

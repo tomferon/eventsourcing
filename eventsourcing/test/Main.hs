@@ -1,7 +1,8 @@
 import System.IO
 import Test.Tasty
 
-import qualified Database.CQRS.InMemoryTest as InMem
+import qualified Database.CQRS.InMemoryTest    as InMem
+import qualified Database.CQRS.TabularDataTest as TabularData
 import qualified Database.CQRS.TransformerTest as Transformer
 
 main :: IO ()
@@ -11,5 +12,6 @@ main = do
   hSetEncoding stderr utf8
   defaultMain $ testGroup "All tests"
     [ InMem.tests
+    , TabularData.tests
     , Transformer.tests
     ]
