@@ -213,7 +213,8 @@ type PGBillingAccountStreamFamily =
     BillingAccountId BillingAccountEventId EventMetadata BillingAccountEvent
 
 getBillingAccountStreamFamily
-  :: Rdr.ReaderT (Pool.Pool PG.Connection) m PGBillingAccountStreamFamily
+  :: Monad m
+  => Rdr.ReaderT (Pool.Pool PG.Connection) m PGBillingAccountStreamFamily
 getBillingAccountStreamFamily = do
   pool <- Rdr.ask
   pure $ CQRS.PG.makeStreamFamily
@@ -279,7 +280,8 @@ balanceAggregator ewc =
       St.modify' (- amount)
 
 getCurrentBalance
-  :: BillingAccountId
+  :: Monad m
+  => BillingAccountId
   -> Rdr.ReaderT (Pool.Pool PG.Connection) m (Fixed E2)
 getCurrentBalance baId = do
   family <- getBillingAccountStreamFamily

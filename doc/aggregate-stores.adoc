@@ -1,1 +1,85 @@
-FIXME
+= Aggregate stores
+
+An aggregate store is an in-memory cache of aggregates according to some
+aggregator. When queried on a cached aggregate, it only fetches and applies
+the new events. If several queries follow each other in a very short time window
+(less than the **lag tolerance**,) it skips any call to the back-end storing the
+events entirely and simply returns the aggregate from the cache. Aggregate
+stores can greatly improve the performance of your application.
+
+== Prerequisites
+
+Before using an aggregate store, you should have some events, a type for the
+aggregate and an aggregator. These concepts are explained in the
+xref:./tutorial.adoc[tutorial] and this document will reuse the same example.
+
+== Creating the aggregate store
+
+Typically, your application's code will run in a monad providing some kind of
+environment. Here, we'll simply use `ReaderT`. The aggregate store is
+constructed when initialising the environment and available to the application
+later on.
+
+[source,haskell]
+----
+import Data.Fixed
+
+import qualified Control.Monad.Except   as Exc
+import qualified Control.Monad.Reader   as Rdr
+import qualified Data.Pool              as Pool
+import qualified Data.PostgreSQL.Simple as PG
+
+import qualified Database.CQRS.ReadModel.AggregateStore as CQRS.AS
+
+data Environment = Environment
+  { connectionPool :: Pool.Pool PG.Connection
+  , balanceAggregateStore
+      :: CQRS.AS.AggregateStore
+          PGBillingAccountStreamFamily -- From tutorial.
+          (Fixed E2)
+  }
+
+buildEnvironment :: Pool.Pool PG.Connection -> IO Environment
+buildEnvironment pool = do
+  -- From tutorial.
+  streamFamily <- Rdr.runReaderT getBillingAccountStreamFamily pool
+
+  as <- CQRS.AS.makeAggregateStore
+    streamFamily
+    balanceAggregator -- From tutorial.
+    (const 0) -- Build initial state from stream identifier.
+    0.1 -- Lag tolerance in seconds.
+    -- In this case, if the aggregate has been updated in the last 100ms, just
+    -- return it.
+    1000 -- Maximum size of the cache.
+
+  pure Environment
+    { connectionPool        = pool
+    , balanceAggregateStore = as
+    }
+----
+
+== Querying the aggregate store
+
+In this environment, we can know rewrite the function `getCurrentBalance` to use
+the aggregate store instead of fetching all events every time.
+
+[source,haskell]
+----
+getCurrentBalance
+  :: MonadIO m
+  => BillingAccountId
+  -> Rdr.ReaderT Environment m (Fixed E2)
+getCurrentBalance baId = do
+  as <- Rdr.asks balanceAggregateStore
+
+  eRes <- Exc.runExceptT $ do
+    response <- CQRS.query as baId
+    pure $ CQRS.AS.aggregate response
+
+  case eRes of
+    Left err ->
+      -- Handle errors. (err :: CQRS.Error)
+      error "meh!"
+    Right balance -> pure balance
+----
