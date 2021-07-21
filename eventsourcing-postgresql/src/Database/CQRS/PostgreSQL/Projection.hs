@@ -58,41 +58,41 @@ executeSqlActions
   => ([action] -> [SqlAction])
   -> (forall r. (PG.Connection -> IO r) -> IO r)
   -> TrackingTable streamId eventId st
-  -> Pipes.Consumer (st, [action], streamId, eventId) m ()
-executeSqlActions transform connectionPool trackingTable =
-  forever $ do
-    (st, actions, streamId, eventId) <- Pipes.await
+  -> (st, [action], streamId, eventId)
+  -> m ()
+executeSqlActions transform connectionPool trackingTable
+  (st, actions, streamId, eventId) = do
 
-    let sqlActions = transform actions
-        (query, values) =
-          appendSqlActions
-            [ ("BEGIN", [])
-            , appendSqlActions sqlActions
-            , upsertTrackingTable
-                trackingTable streamId eventId (Right st)
-            , ("COMMIT", [])
-            ]
+  let sqlActions = transform actions
+      (query, values) =
+        appendSqlActions
+          [ ("BEGIN", [])
+          , appendSqlActions sqlActions
+          , upsertTrackingTable
+              trackingTable streamId eventId (Right st)
+          , ("COMMIT", [])
+          ]
 
-    Exc.liftEither <=< liftIO . connectionPool $ \conn -> do
-      eRes <-
-        (Right <$> PG.execute conn query values)
+  Exc.liftEither <=< liftIO . connectionPool $ \conn -> do
+    eRes <-
+      (Right <$> PG.execute conn query values)
+        `catches`
+          [ handleError (Proxy @PG.FormatError) id
+          , handleError (Proxy @PG.SqlError)    id
+          ]
+
+    case eRes of
+      Left err -> do
+        let (uquery, uvalues) =
+              upsertTrackingTable
+                trackingTable streamId eventId
+                (Left err :: Either String st)
+        (const (Right ()) <$> PG.execute conn uquery uvalues)
           `catches`
-            [ handleError (Proxy @PG.FormatError) id
-            , handleError (Proxy @PG.SqlError)    id
+            [ handleError (Proxy @PG.FormatError) CQRS.ProjectionError
+            , handleError (Proxy @PG.SqlError)    CQRS.ProjectionError
             ]
-
-      case eRes of
-        Left err -> do
-          let (uquery, uvalues) =
-                upsertTrackingTable
-                  trackingTable streamId eventId
-                  (Left err :: Either String st)
-          (const (Right ()) <$> PG.execute conn uquery uvalues)
-            `catches`
-              [ handleError (Proxy @PG.FormatError) CQRS.ProjectionError
-              , handleError (Proxy @PG.SqlError)    CQRS.ProjectionError
-              ]
-        Right _ -> pure $ Right ()
+      Right _ -> pure $ Right ()
 
 -- | Execute custom actions by calling the runner function on each action in
 -- turn and updating the tracking table accordingly.
@@ -109,26 +109,26 @@ executeCustomActions
   -- If any of the rollback actions fail, the others are not run.
   -- Rollback actions are run in reversed order.
   -> TrackingTable streamId eventId st
-  -> Pipes.Consumer (st, [action], streamId, eventId) m ()
-executeCustomActions runAction trackingTable =
-  forever $ do
-    (st, actions, streamId, eventId) <- Pipes.await
+  -> (st, [action], streamId, eventId)
+  -> m ()
+executeCustomActions runAction trackingTable
+  (st, actions, streamId, eventId) = do
 
-    (eRes, rollbackActions) <- lift . flip St.runStateT [] . Exc.runExceptT $
-      forM_ actions $ \action -> do
-        errOrRollback <- lift . lift . runAction $ action
-        case errOrRollback of
-          Left err -> Exc.throwError err
-          Right rollbackAction -> St.modify' (rollbackAction :)
+  (eRes, rollbackActions) <- flip St.runStateT [] . Exc.runExceptT $
+    forM_ actions $ \action -> do
+      errOrRollback <- lift . lift . runAction $ action
+      case errOrRollback of
+        Left err -> Exc.throwError err
+        Right rollbackAction -> St.modify' (rollbackAction :)
 
-    lift $ case eRes of
-      Left err -> do
-        doUpsertTrackingTable trackingTable streamId eventId
-          (Left err :: Either String st)
-        sequence_ rollbackActions
+  case eRes of
+    Left err -> do
+      doUpsertTrackingTable trackingTable streamId eventId
+        (Left err :: Either String st)
+      sequence_ rollbackActions
 
-      Right () ->
-        doUpsertTrackingTable trackingTable streamId eventId (Right st)
+    Right () ->
+      doUpsertTrackingTable trackingTable streamId eventId (Right st)
 
 fromTabularDataActions
   :: FromTabularDataAction cols
