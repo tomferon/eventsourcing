@@ -1,12 +1,12 @@
-{-# LANGUAGE DeriveFunctor #-}
+{-# LANGUAGE DeriveFunctor             #-}
 {-# LANGUAGE ExistentialQuantification #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE TupleSections #-}
-{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE FlexibleContexts          #-}
+{-# LANGUAGE FlexibleInstances         #-}
+{-# LANGUAGE LambdaCase                #-}
+{-# LANGUAGE MultiParamTypeClasses     #-}
+{-# LANGUAGE RecordWildCards           #-}
+{-# LANGUAGE TupleSections             #-}
+{-# LANGUAGE TypeFamilies              #-}
 
 module Database.CQRS.Transformer
   ( -- * Transformed stream
@@ -26,14 +26,14 @@ module Database.CQRS.Transformer
   , failTransformer
   ) where
 
-import Control.Monad (forM_)
+import Control.Monad       (forM_)
 import Control.Monad.Trans (lift)
-import Data.Functor ((<&>))
-import Data.Hashable (Hashable)
+import Data.Functor        ((<&>))
+import Data.Hashable       (Hashable)
 
-import qualified Data.HashMap.Strict as HM
 import qualified Control.Monad.Free  as Free
 import qualified Control.Monad.State as St
+import qualified Data.HashMap.Strict as HM
 import qualified Pipes
 import qualified Pipes.Prelude       as Pipes
 
@@ -97,7 +97,7 @@ transformedStreamStreamEvents TransformedStream{..} bounds = do
             runTransform waitingEvents . mapM_ transformer $ batch
       Pipes.each $ batches <&> \case
         Left err -> [Left err]
-        Right b -> map Right b
+        Right b  -> map Right b
 
       -- If there are too many waiting events, we flush them anyway to avoid
       -- using too much memmory.
@@ -192,7 +192,7 @@ transformedStreamFamilyAllNewEvents
                 (eventId, String)
                 (CQRS.EventWithContext eventId metadata event)
             ) ]
-          m a)
+          m ())
 transformedStreamFamilyAllNewEvents TransformedStreamFamily{..} = do
   inputNewEvents <- CQRS.allNewEvents inputStreamFamily
   pure $ Pipes.for inputNewEvents $ \batch -> do
@@ -204,7 +204,7 @@ transformedStreamFamilyAllNewEvents TransformedStreamFamily{..} = do
             runTransform [] . mapM_ streamTransformer $ events
       Pipes.each $ (batches ++ [Right waitingEvents]) <&> \case
         Left err -> [(streamId, Left err)]
-        Right b -> map ((streamId,) . Right) b
+        Right b  -> map ((streamId,) . Right) b
 
 transformedStreamFamilyLatestEventIdentifiers
   :: Monad m

@@ -1,5 +1,5 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeFamilies          #-}
 
 module Database.CQRS.StreamFamily
   ( StreamFamily(..)
@@ -51,7 +51,7 @@ class StreamFamily f fam where
                 (EventIdentifier (StreamType fam), String)
                 (EventWithContext' (StreamType fam))
             ) ]
-          f a)
+          f ())
 
   -- | Stream the identifier of the latest events for each stream in the family.
   --

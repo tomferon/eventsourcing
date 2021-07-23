@@ -1,15 +1,14 @@
+{-# LANGUAGE AllowAmbiguousTypes  #-}
+{-# LANGUAGE DataKinds            #-}
+{-# LANGUAGE FlexibleContexts     #-}
+{-# LANGUAGE GADTs                #-}
+{-# LANGUAGE KindSignatures       #-}
+{-# LANGUAGE LambdaCase           #-}
+{-# LANGUAGE OverloadedStrings    #-}
+{-# LANGUAGE RankNTypes           #-}
+{-# LANGUAGE ScopedTypeVariables  #-}
+{-# LANGUAGE TypeApplications     #-}
 {-# LANGUAGE UndecidableInstances #-}
-{-# LANGUAGE KindSignatures #-}
-{-# LANGUAGE AllowAmbiguousTypes #-}
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE GADTs #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TupleSections #-}
-{-# LANGUAGE TypeApplications #-}
 
 module Database.CQRS.PostgreSQL.Projection
   ( Projection
@@ -19,12 +18,12 @@ module Database.CQRS.PostgreSQL.Projection
   ) where
 
 import Control.Exception
-import Control.Monad              ((<=<), forever, forM_)
-import Control.Monad.Trans        (MonadIO(..), lift)
+import Control.Monad              (forM_, (<=<))
+import Control.Monad.Trans        (MonadIO (..), lift)
 import Data.List                  (intersperse)
-import Data.Proxy                 (Proxy(..))
+import Data.Proxy                 (Proxy (..))
 import Data.String                (fromString)
-import Database.PostgreSQL.Simple ((:.)(..))
+import Database.PostgreSQL.Simple ((:.) (..))
 
 import qualified Control.Monad.Except               as Exc
 import qualified Control.Monad.Identity             as Id
@@ -33,7 +32,6 @@ import qualified Data.Bifunctor                     as Bifunctor
 import qualified Database.PostgreSQL.Simple         as PG
 import qualified Database.PostgreSQL.Simple.ToField as PG.To
 import qualified Database.PostgreSQL.Simple.Types   as PG
-import qualified Pipes
 
 import Database.CQRS.PostgreSQL.Internal
 import Database.CQRS.PostgreSQL.TrackingTable
@@ -87,7 +85,7 @@ executeSqlActions transform connectionPool trackingTable
               upsertTrackingTable
                 trackingTable streamId eventId
                 (Left err :: Either String st)
-        (const (Right ()) <$> PG.execute conn uquery uvalues)
+        (Right () <$ PG.execute conn uquery uvalues)
           `catches`
             [ handleError (Proxy @PG.FormatError) CQRS.ProjectionError
             , handleError (Proxy @PG.SqlError)    CQRS.ProjectionError
@@ -118,7 +116,7 @@ executeCustomActions runAction trackingTable
     forM_ actions $ \action -> do
       errOrRollback <- lift . lift . runAction $ action
       case errOrRollback of
-        Left err -> Exc.throwError err
+        Left err             -> Exc.throwError err
         Right rollbackAction -> St.modify' (rollbackAction :)
 
   case eRes of
@@ -327,9 +325,9 @@ makeCond
   :: PG.To.ToField a
   => PG.To.Action -> CQRS.Tab.Condition a -> (PG.Query, [PG.To.Action])
 makeCond name = \case
-  CQRS.Tab.Equal x -> ("? = ?", [name, PG.To.toField x])
-  CQRS.Tab.NotEqual x -> ("? <> ?", [name, PG.To.toField x])
-  CQRS.Tab.LowerThan x -> ("? < ?", [name, PG.To.toField x])
-  CQRS.Tab.LowerThanOrEqual x -> ("? <= ?", [name, PG.To.toField x])
-  CQRS.Tab.GreaterThan x -> ("? > ?", [name, PG.To.toField x])
+  CQRS.Tab.Equal x              -> ("? = ?", [name, PG.To.toField x])
+  CQRS.Tab.NotEqual x           -> ("? <> ?", [name, PG.To.toField x])
+  CQRS.Tab.LowerThan x          -> ("? < ?", [name, PG.To.toField x])
+  CQRS.Tab.LowerThanOrEqual x   -> ("? <= ?", [name, PG.To.toField x])
+  CQRS.Tab.GreaterThan x        -> ("? > ?", [name, PG.To.toField x])
   CQRS.Tab.GreaterThanOrEqual x -> ("? >= ?", [name, PG.To.toField x])

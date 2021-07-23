@@ -28,6 +28,7 @@ library
     Database.CQRS.Error
     Database.CQRS.Event
     Database.CQRS.InMemory
+    Database.CQRS.Interruptible
     Database.CQRS.Projection
     Database.CQRS.ReadModel
     Database.CQRS.ReadModel.AggregateStore
