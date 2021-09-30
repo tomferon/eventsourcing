@@ -1,9 +1,7 @@
-{ nixpkgs }:
+{ pkgs }:
 
 let
-  inherit (nixpkgs) pkgs;
-
-  ghcVersion = "ghc883";
+  ghcVersion = "ghc8107";
 
   hsPkgs = pkgs.haskell.packages.${ghcVersion};
 

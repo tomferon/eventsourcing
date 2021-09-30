@@ -1,9 +1,9 @@
-let
-  sources = import ./sources.nix;
-  nixpkgs = import sources.nixpkgs {};
-  inherit (nixpkgs) pkgs lib;
+{ pkgs }:
 
-  haskellCustom = import ./haskell.nix { inherit nixpkgs; };
+let
+  inherit (pkgs) lib;
+
+  haskellCustom = import ./haskell.nix { inherit pkgs; };
   ghcCustom = haskellCustom.ghcWithPackages;
 
 in
