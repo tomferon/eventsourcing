@@ -34,6 +34,8 @@ module Database.CQRS
 
     -- * Read models
   , ReadModel(..)
+  , ReadModelF
+  , toReadModelF
 
     -- * Transformers
   , Transformer

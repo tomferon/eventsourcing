@@ -32,6 +32,7 @@ library
     Database.CQRS.Projection
     Database.CQRS.ReadModel
     Database.CQRS.ReadModel.AggregateStore
+    Database.CQRS.ReadModel.TopUp
     Database.CQRS.Stream
     Database.CQRS.StreamFamily
     Database.CQRS.TabularData
@@ -52,7 +53,7 @@ library
     time,
     unordered-containers
 
-test-suite unit-tests
+test-suite eventsourcing-unit-tests
   type:              exitcode-stdio-1.0
   main-is:           Main.hs
   hs-source-dirs:    test

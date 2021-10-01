@@ -1,12 +1,14 @@
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE InstanceSigs #-}
+{-# OPTIONS_GHC -fno-warn-orphans #-}
+
+{-# LANGUAGE FlexibleContexts      #-}
+{-# LANGUAGE FlexibleInstances     #-}
+{-# LANGUAGE InstanceSigs          #-}
+{-# LANGUAGE LambdaCase            #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE OverloadedStrings     #-}
+{-# LANGUAGE RankNTypes            #-}
+{-# LANGUAGE RecordWildCards       #-}
+{-# LANGUAGE TypeApplications      #-}
 
 module Database.CQRS.PostgreSQL.TrackingTable
   ( TrackingTable
@@ -15,27 +17,21 @@ module Database.CQRS.PostgreSQL.TrackingTable
   , doUpsertTrackingTable
   ) where
 
-import Control.Applicative ((<|>))
-import Control.Exception (catches)
-import Control.Monad ((<=<), void)
-import Control.Monad.Trans (MonadIO(..))
-import Data.Proxy (Proxy(..))
+import Control.Monad       (void, (<=<))
+import Control.Monad.Trans (MonadIO (..))
 
 import qualified Control.Monad.Except                 as Exc
 import qualified Database.PostgreSQL.Simple           as PG
-import qualified Database.PostgreSQL.Simple.Types     as PG
 import qualified Database.PostgreSQL.Simple.FromField as PG.From
 import qualified Database.PostgreSQL.Simple.ToField   as PG.To
 import qualified Database.PostgreSQL.Simple.ToRow     as PG.To
+import qualified Database.PostgreSQL.Simple.Types     as PG
 
-import Database.CQRS.PostgreSQL.Internal (makeSqlAction, SqlAction, handleError)
+import Database.CQRS.PostgreSQL.Internal
+  (SqlAction, makeSqlAction)
+import Database.CQRS.PostgreSQL.TrackingTable.Internal
 
 import qualified Database.CQRS as CQRS
-
-data TrackingTable streamId eventId st = TrackingTable
-  { connectionPool :: forall r. (PG.Connection -> IO r) -> IO r
-  , relation       :: PG.Query
-  }
 
 instance
     ( Exc.MonadError CQRS.Error m
@@ -55,18 +51,8 @@ instance
     -> streamId
     -> m (CQRS.TrackedState eventId st)
   getTrackedState TrackingTable{..} streamId =
-    handlePgErrors . connectionPool $ \conn -> do
-      let query =
-            "SELECT event_id, failed_event_id, failed_message, state FROM "
-            <> relation <> " WHERE stream_id = ?"
-      rows <- PG.query conn query (PG.Only streamId)
-      pure $ case rows of
-        [(Just eventId, Nothing, Nothing, SomeState state)] ->
-          CQRS.SuccessAt eventId state
-        [(mEventId, Just failedAt, Just err, oState)] ->
-          CQRS.FailureAt
-            ((,) <$> mEventId <*> fromOptionalState oState) failedAt err
-        _ -> CQRS.NeverRan
+    Exc.liftEither <=< liftIO . connectionPool $ \conn ->
+      getTrackedStateWithConn conn relation streamId
 
   upsertError
     :: TrackingTable streamId eventId st
@@ -157,40 +143,3 @@ createTrackingTable
     void $ PG.execute_ conn query
 
   pure TrackingTable{..}
-
-handlePgErrors
-  :: ( Exc.MonadError CQRS.Error m
-     , MonadIO m
-     )
-  => IO a -> m a
-handlePgErrors f =
-  Exc.liftEither <=< liftIO $ do
-    (Right <$> f)
-    `catches`
-      [ handleError (Proxy @PG.FormatError) CQRS.TrackingTableError
-      , handleError (Proxy @PG.SqlError)    CQRS.TrackingTableError
-      , handleError (Proxy @PG.QueryError)  CQRS.TrackingTableError
-      , handleError (Proxy @PG.ResultError) CQRS.TrackingTableError
-      ]
-
--- | An alternative to 'Maybe st'.
---
--- If we use 'Maybe st' and 'st ~ Maybe a' (or something else where @NULL@ is a
--- valid state,) then 'getTrackedState''s @SELECT@ statement would return a
--- value of type 'Maybe (Maybe a)' which would be 'Nothing' instead of
--- 'Just Nothing' if the column is 'NULL.
---
--- This type works differently: it tries to use 'PG.From.fromField' on the field
--- and return 'NoState' if it didn't work AND it is @NULL@. Otherwise, it fails.
-data OptionalState st = SomeState st | NoState
-
-instance PG.From.FromField st => PG.From.FromField (OptionalState st) where
-  fromField f mBS =
-    case mBS of
-      Nothing -> (SomeState <$> PG.From.fromField f mBS) <|> pure NoState
-      Just _  -> SomeState <$> PG.From.fromField f mBS
-
-fromOptionalState :: OptionalState a -> Maybe a
-fromOptionalState = \case
-  SomeState x -> Just x
-  NoState     -> Nothing
