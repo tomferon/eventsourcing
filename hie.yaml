@@ -1,0 +1,8 @@
+cradle:
+  cabal:
+    - path: eventsourcing/src
+      component: eventsourcing
+    - path: eventsourcing/test
+      component: eventsourcing-unit-tests
+    - path: eventsourcing-postgresql/src
+      component: eventsourcing-postgresql

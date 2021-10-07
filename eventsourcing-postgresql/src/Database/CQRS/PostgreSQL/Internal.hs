@@ -1,18 +1,18 @@
 {-# LANGUAGE ExistentialQuantification #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE FlexibleContexts          #-}
+{-# LANGUAGE LambdaCase                #-}
+{-# LANGUAGE OverloadedStrings         #-}
+{-# LANGUAGE RankNTypes                #-}
+{-# LANGUAGE ScopedTypeVariables       #-}
+{-# LANGUAGE TypeApplications          #-}
 
 module Database.CQRS.PostgreSQL.Internal where
 
 import Control.Exception
 
-import qualified Database.PostgreSQL.Simple           as PG
-import qualified Database.PostgreSQL.Simple.ToField   as PG.To
-import qualified Database.PostgreSQL.Simple.ToRow     as PG.To
+import qualified Database.PostgreSQL.Simple         as PG
+import qualified Database.PostgreSQL.Simple.ToField as PG.To
+import qualified Database.PostgreSQL.Simple.ToRow   as PG.To
 
 -- | Return all the 'Right' elements before the first 'Left' and the value of
 -- the first 'Left'.
@@ -21,7 +21,7 @@ stopOnLeft = go id
   where
     go :: ([b] -> [b]) -> [Either a b] -> ([b], Maybe a)
     go f = \case
-      [] -> (f [], Nothing)
+      []           -> (f [], Nothing)
       Left err : _ -> (f [], Just err)
       Right x : xs -> go (f . (x:)) xs
 
@@ -32,7 +32,7 @@ makeSqlAction query r = (query, PG.To.toRow r)
 
 appendSqlActions :: [SqlAction] -> SqlAction
 appendSqlActions = \case
-    [] -> ("", [])
+    []               -> ("", [])
     action : actions -> foldl step action actions
   where
     step :: SqlAction -> SqlAction -> SqlAction
