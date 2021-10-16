@@ -13,6 +13,7 @@ module Database.CQRS.PostgreSQL
   , executeSqlActions
   , executeCustomActions
   , fromTabularDataActions
+  , TrackingTable
   , createTrackingTable
   ) where
 
