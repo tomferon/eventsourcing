@@ -247,8 +247,11 @@ runProjection streamFamily initState projection trackingTable
               . mapM projection
               $ events
 
-      unless (null actions) $ do
-        -- There is a last event, otherwise actions would be empty.
+      -- Event if actions is an empty list, we still want to yield an empty list
+      -- such that the tracking table will get updated, possibly with an updated
+      -- internal state.
+      unless (null events) $ do
+        -- There is a last event, otherwise @null events@ would be True.
         let latestEventId = identifier . last $ events
         Pipes.yield (st', actions, streamId, latestEventId)
 
