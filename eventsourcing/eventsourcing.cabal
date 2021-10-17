@@ -48,6 +48,7 @@ library
     hashable,
     mtl,
     pipes >=4.3,
+    profunctors,
     psqueues >=0.2,
     stm >=2.5,
     time,

@@ -7,7 +7,7 @@
 * `TopUpReadModel`: A read model which fetches a projected state from an
   underlying read model, looks for new events since the projection last ran and
   applies an aggregator.
-* Add `ReadModelF` to turn any read model into a functor.
+* Add `ReadModelP` to turn any read model into a profunctor.
 
 ## 0.9.0 -- 2020-08-16
 
