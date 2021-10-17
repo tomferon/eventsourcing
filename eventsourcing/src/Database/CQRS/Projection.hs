@@ -1,11 +1,12 @@
-{-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE TupleSections #-}
-{-# LANGUAGE TypeApplications #-}
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE DeriveFunctor          #-}
+{-# LANGUAGE FlexibleContexts       #-}
+{-# LANGUAGE FlexibleInstances      #-}
 {-# LANGUAGE FunctionalDependencies #-}
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE LambdaCase             #-}
+{-# LANGUAGE RecordWildCards        #-}
+{-# LANGUAGE ScopedTypeVariables    #-}
+{-# LANGUAGE TupleSections          #-}
+{-# LANGUAGE TypeApplications       #-}
 
 module Database.CQRS.Projection
   ( Aggregator
@@ -20,15 +21,15 @@ module Database.CQRS.Projection
   ) where
 
 import Control.Monad
-import Control.Monad.Trans (MonadIO(..), lift)
-import Data.Hashable (Hashable)
-import Data.Tuple (swap)
-import Pipes ((>->))
+import Control.Monad.Trans (MonadIO (..), lift)
+import Data.Hashable       (Hashable)
+import Data.Tuple          (swap)
+import Pipes               ((>->))
 
-import qualified Data.HashMap.Strict        as HM
 import qualified Control.Concurrent.STM     as STM
 import qualified Control.Monad.Except       as Exc
 import qualified Control.Monad.State.Strict as St
+import qualified Data.HashMap.Strict        as HM
 import qualified Pipes
 
 import Database.CQRS.Error
@@ -212,7 +213,7 @@ runProjection streamFamily initState projection trackingTable
         -- should retry.
         FailureAt mSuccess eventId _ -> do
           let check = \case
-                Left (eventId', _) -> eventId' <= eventId
+                Left (eventId', _)         -> eventId' <= eventId
                 Right EventWithContext{..} -> identifier <= eventId
           when (any check eEvents) $
             case mSuccess of
@@ -315,7 +316,7 @@ stopOnLeft = go id
   where
     go :: ([b] -> [b]) -> [Either a b] -> ([b], Maybe a)
     go f = \case
-      [] -> (f [], Nothing)
+      []           -> (f [], Nothing)
       Left err : _ -> (f [], Just err)
       Right x : xs -> go (f . (x:)) xs
 
@@ -324,7 +325,7 @@ data TrackedState identifier st
   | SuccessAt identifier st
   | FailureAt (Maybe (identifier, st)) identifier String
     -- ^ Last succeeded at, failed at.
-  deriving (Eq, Show)
+  deriving (Eq, Show, Functor)
 
 class
     TrackingTable m table streamId eventId st
@@ -356,7 +357,7 @@ instance
     liftIO . STM.atomically . STM.modifyTVar tvar $
       HM.alter
         (\case
-          Nothing -> Just (Nothing, Just (eventId, err))
+          Nothing            -> Just (Nothing, Just (eventId, err))
           Just (mSuccess, _) -> Just (mSuccess, Just (eventId, err)))
         streamId
 

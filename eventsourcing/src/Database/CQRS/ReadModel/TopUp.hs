@@ -2,6 +2,8 @@
 {-# LANGUAGE FlexibleInstances     #-}
 {-# LANGUAGE LambdaCase            #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE QuantifiedConstraints #-}
+{-# LANGUAGE RankNTypes            #-}
 {-# LANGUAGE RecordWildCards       #-}
 {-# LANGUAGE TypeFamilies          #-}
 {-# LANGUAGE UndecidableInstances  #-}
@@ -95,14 +97,16 @@ topUpReadModelQuery TopUpReadModel{..} streamId = do
 -- which return a 'TrackedState' into one suitable as the underlying read model
 -- of a 'TopUpReadModel'.
 trackedStateToTopUpUnderlyingReadModel
-  :: ( CQRS.ReadModelResponse model ~ CQRS.TrackedState eventId a
+  :: ( forall f. CQRS.AllF cs f => CQRS.ReadModel f model
+     , CQRS.ReadModelResponse model ~ CQRS.TrackedState eventId a
      , Ord eventId
      )
   => model
-  -> CQRS.ReadModelF model
+  -> CQRS.ReadModelP cs
+      (CQRS.ReadModelQuery model)
       (Either CQRS.Error (CQRS.StreamBounds eventId, Maybe a))
 trackedStateToTopUpUnderlyingReadModel model =
-  CQRS.toReadModelF model <&> \case
+  CQRS.toReadModelP model <&> \case
     CQRS.NeverRan            -> Right (mempty, Nothing)
     CQRS.SuccessAt eventId x -> Right (CQRS.afterEvent eventId, Just x)
     CQRS.FailureAt _ _ err   -> Left $ CQRS.ProjectionError err
