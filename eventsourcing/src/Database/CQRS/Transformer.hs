@@ -195,16 +195,21 @@ transformedStreamFamilyAllNewEvents
           m ())
 transformedStreamFamilyAllNewEvents TransformedStreamFamily{..} = do
   inputNewEvents <- CQRS.allNewEvents inputStreamFamily
-  pure $ Pipes.for inputNewEvents $ \batch -> do
-    let eventsByStream =
-          HM.toList . HM.fromListWith (++) . map (fmap pure) $ batch
-    forM_ eventsByStream $ \(inputStreamId, events) -> do
-      streamId <- lift $ makeStreamIdentifier inputStreamId
-      let (batches, waitingEvents) =
-            runTransform [] . mapM_ streamTransformer $ events
-      Pipes.each $ (batches ++ [Right waitingEvents]) <&> \case
-        Left err -> [(streamId, Left err)]
-        Right b  -> map ((streamId,) . Right) b
+  pure $ Pipes.for inputNewEvents $ \case
+    [] -> Pipes.yield [] -- Pass empty batches downstream, e.g. for migrations.
+    batch -> do
+      let eventsByStream =
+            HM.toList . HM.fromListWith (++) . map (fmap pure) $ batch
+      forM_ eventsByStream $ \(inputStreamId, events) -> do
+        streamId <- lift $ makeStreamIdentifier inputStreamId
+        let (batches, waitingEvents) =
+              runTransform [] . mapM_ streamTransformer $ events
+            batches'
+              | null waitingEvents = batches
+              | otherwise = batches ++ [Right waitingEvents]
+        Pipes.each $ batches' <&> \case
+          Left err -> [(streamId, Left err)]
+          Right b  -> map ((streamId,) . Right) b
 
 transformedStreamFamilyLatestEventIdentifiers
   :: Monad m
