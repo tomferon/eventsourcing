@@ -1,36 +1,40 @@
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE NamedFieldPuns #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE FlexibleContexts    #-}
+{-# LANGUAGE NamedFieldPuns      #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE RecordWildCards     #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeApplications    #-}
 
 module Database.CQRS.PostgreSQL.Migration
   ( migrate
+  , lockTable
+  , swapTables
+  , lockTableNoTransaction
+  , swapTablesNoTransaction
   ) where
 
 import Control.Exception
-import Control.Monad              ((<=<), unless)
-import Control.Monad.Trans        (MonadIO(..), lift)
+import Control.Monad              (forever, unless, (<=<))
+import Control.Monad.Trans        (MonadIO (..), lift)
 import Data.Hashable              (Hashable)
 import Data.List                  (foldl', intersperse)
-import Data.Proxy                 (Proxy(..))
-import Database.PostgreSQL.Simple ((:.)(..))
+import Data.Proxy                 (Proxy (..))
+import Database.PostgreSQL.Simple ((:.) (..))
 import Pipes                      ((>->))
 
 import qualified Control.Monad.Except                 as Exc
 import qualified Control.Monad.State.Strict           as St
 import qualified Data.HashMap.Strict                  as HM
 import qualified Database.PostgreSQL.Simple           as PG
-import qualified Database.PostgreSQL.Simple.Types     as PG
 import qualified Database.PostgreSQL.Simple.FromField as PG.From
 import qualified Database.PostgreSQL.Simple.FromRow   as PG.From
 import qualified Database.PostgreSQL.Simple.ToField   as PG.To
 import qualified Database.PostgreSQL.Simple.ToRow     as PG.To
+import qualified Database.PostgreSQL.Simple.Types     as PG
 import qualified Pipes
 
-import Database.CQRS.PostgreSQL.StreamFamily
 import Database.CQRS.PostgreSQL.Internal
+import Database.CQRS.PostgreSQL.StreamFamily
 
 import qualified Database.CQRS as CQRS
 
@@ -88,10 +92,11 @@ migrate
   -> (PG.Query -> PG.Query)
   -- ^ Query to lock the relation used by the application. It is given the name
   -- of the current relation. It must be idempotent to be able to restart the
-  -- migrator.
-  -> (PG.Query -> PG.Query)
+  -- migrator. It must be impossible to write to the old relation even after the
+  -- transaction is over, so don't use LOCK. See 'lockTable'.
+  -> (PG.Query -> PG.Query -> PG.Query)
   -- ^ Query to swap the relation used by the application. It is given the name
-  -- of the current relation.
+  -- of the current and temporary relations in that order. See 'swapTables'.
   -> m ()
 migrate fam@StreamFamily { connectionPool, relation } transform
         tempRelation streamIdentifierColumn
@@ -101,7 +106,7 @@ migrate fam@StreamFamily { connectionPool, relation } transform
     let transformedStreamFamily = transform fam
 
     Exc.liftEither <=< liftIO . connectionPool $ \conn ->
-      (const (Right ()) <$> PG.execute_ conn (initQuery relation))
+      (Right () <$ PG.execute_ conn (initQuery relation))
       `catches` handlers
 
     newEvents <- CQRS.allNewEvents transformedStreamFamily
@@ -126,13 +131,13 @@ migrate fam@StreamFamily { connectionPool, relation } transform
       -- notifications one last time and swap the relations.
 
       Exc.liftEither <=< liftIO . connectionPool $ \conn ->
-        (const (Right ()) <$> PG.execute_ conn (lockQuery relation))
+        (Right () <$ PG.execute_ conn (lockQuery relation))
         `catches` handlers
 
       processNewEvents newEvents
 
       Exc.liftEither <=< liftIO . connectionPool $ \conn ->
-        (const (Right ()) <$> PG.execute_ conn (swapQuery relation))
+        (Right () <$ PG.execute_ conn (swapQuery relation tempRelation))
         `catches` handlers
 
   where
@@ -148,7 +153,7 @@ migrate fam@StreamFamily { connectionPool, relation } transform
               (CQRS.EventIdentifier (CQRS.StreamType transformedStreamFamily)))
             m)
           ()
-    migrateStream transformedStreamFamily = do
+    migrateStream transformedStreamFamily = forever $ do
       (streamId, eventId) <- Pipes.await
       stream <- lift . lift $ CQRS.getStream transformedStreamFamily streamId
 
@@ -170,8 +175,7 @@ migrate fam@StreamFamily { connectionPool, relation } transform
 
             unless (null ewcs) $ do
               Exc.liftEither <=< liftIO . connectionPool $ \conn ->
-                (const (Right ())
-                  <$> PG.execute conn insertQuery (PG.Only (PG.Values [] params)))
+                (Right () <$ PG.execute conn insertQuery (PG.Only (PG.Values [] params)))
                 `catches` handlers
 
               let lastEventId = CQRS.identifier . last $ ewcs
@@ -197,7 +201,7 @@ migrate fam@StreamFamily { connectionPool, relation } transform
             (CQRS.StreamIdentifier transformedStreamFamily)
             (CQRS.EventIdentifier (CQRS.StreamType transformedStreamFamily)))
           m ()
-    processNewEvents newEvents =
+    processNewEvents newEvents = do
       Pipes.runEffect . untilEmpty (Pipes.hoist lift newEvents) $ \batch -> do
         state <- St.get
 
@@ -213,8 +217,7 @@ migrate fam@StreamFamily { connectionPool, relation } transform
 
         unless (null events) $
           Exc.liftEither <=< liftIO . connectionPool $ \conn ->
-            (const (Right ())
-              <$> PG.execute conn insertQuery (PG.Only (PG.Values [] params)))
+            (Right () <$ PG.execute conn insertQuery (PG.Only (PG.Values [] params)))
             `catches` handlers
 
         St.put
@@ -252,7 +255,9 @@ migrate fam@StreamFamily { connectionPool, relation } transform
             xs <- Pipes.await
             if null xs
               then pure ()
-              else lift . Pipes.runEffect . f $ xs
+              else do
+                lift . Pipes.runEffect . f $ xs
+                pipe'
       in
       pipe >-> pipe'
 
@@ -263,10 +268,54 @@ migrate fam@StreamFamily { connectionPool, relation } transform
       <> ", " <> eventIdentifierColumn
       <> ", " <> mconcat (intersperse "," metadataColumns)
       <> ", " <> eventColumn
-      <> ") VALUES ?"
+      <> ") ?"
 
     handlers :: [Handler (Either CQRS.Error ())]
     handlers =
       [ handleError (Proxy @PG.FormatError) CQRS.MigrationError
       , handleError (Proxy @PG.SqlError)    CQRS.MigrationError
       ]
+
+lockTable
+  :: Maybe PG.Query -- ^ Trigger name, derived from table name if not present.
+  -> PG.Query -- ^ Table name.
+  -> PG.Query
+lockTable mTrigger relation =
+  "BEGIN; " <> lockTableNoTransaction mTrigger relation <> "; COMMIT"
+
+lockTableNoTransaction :: Maybe PG.Query -> PG.Query -> PG.Query
+lockTableNoTransaction mTrigger relation =
+  "CREATE OR REPLACE FUNCTION eventsourcing_locked() RETURNS trigger AS $$"
+  <> "  BEGIN RAISE 'relation locked'; END; "
+  <> "$$ LANGUAGE plpgsql; "
+  <> "DROP TRIGGER IF EXISTS " <> trigger <> " ON " <> relation <> "; "
+  <> "CREATE TRIGGER " <> trigger
+  <> "  BEFORE INSERT OR UPDATE OR DELETE OR TRUNCATE ON "
+  <> relation <> " EXECUTE PROCEDURE eventsourcing_locked()"
+
+  where
+    trigger :: PG.Query
+    trigger = case mTrigger of
+      Nothing   -> relation <> "_locked"
+      Just name -> name
+
+swapTables
+  :: PG.Query
+     -- ^ New name for the current relation, e.g. @invoicing_events_archive_20201209@.
+  -> PG.Query -- ^ Name of the current relation.
+  -> PG.Query -- ^ Name of the temporary relation.
+  -> PG.Query
+swapTables archived current temp =
+  "BEGIN; "
+  <> swapTablesNoTransaction archived current temp
+  <> "; COMMIT"
+
+swapTablesNoTransaction
+  :: PG.Query
+     -- ^ New name for the current relation, e.g. @invoicing_events_archive_20201209@.
+  -> PG.Query -- ^ Name of the current relation.
+  -> PG.Query -- ^ Name of the temporary relation.
+  -> PG.Query
+swapTablesNoTransaction archived current temp =
+  "ALTER TABLE " <> current <> " RENAME TO " <> archived <> "; "
+  <> "ALTER TABLE " <> temp <> " RENAME TO " <> current
